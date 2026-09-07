@@ -396,7 +396,7 @@ private class DefaultSurfaceProcessor(
         if (!hasFirstFrame) return
 
         val renderTimestampNs = if (cfrFps > 0) {
-            TimeUtils.currentTime() * 1000L
+            System.nanoTime()
         } else {
             latestTimestampNs
         }
