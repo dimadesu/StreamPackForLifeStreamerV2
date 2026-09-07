@@ -121,6 +121,9 @@ private class DefaultSurfaceProcessor(
         if (isReleaseRequested.get()) {
             throw IllegalStateException("SurfaceProcessor is released")
         }
+        require(cfrFps <= 0 || surfaceInputs.isEmpty()) {
+            "CFR mode supports only a single input surface"
+        }
 
         val future = submitSafely {
             if (isReleaseRequested.get()) {
