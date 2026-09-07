@@ -23,6 +23,9 @@ import android.util.Size
 import android.view.Surface
 import io.github.thibaultbee.streampack.core.elements.processing.video.source.DefaultSourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
+import io.github.thibaultbee.streampack.core.elements.processing.video.DefaultSurfaceProcessorFactory
+import io.github.thibaultbee.streampack.core.elements.processing.video.ISurfaceProcessorInternal
+import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
 import io.github.thibaultbee.streampack.core.elements.sources.IMediaProjectionSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceSourceInternal
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
@@ -49,7 +52,9 @@ import kotlinx.coroutines.runBlocking
 internal class MediaProjectionVideoSource(
     private val context: Context,
     override val mediaProjection: MediaProjection,
+    private val dispatcherProvider: IVideoDispatcherProvider,
     private val handlerThreadExecutor: HandlerThreadExecutor,
+    private val cfrFps: Int = 0,
     @RotationValue private val overrideRotation: Int? = null,
 ) : IVideoSourceInternal, ISurfaceSourceInternal, IMediaProjectionSource {
     override val timebase = Timebase.UPTIME
@@ -65,6 +70,8 @@ internal class MediaProjectionVideoSource(
     override val isStreamingFlow = _isStreamingFlow.asStateFlow()
 
     private var outputSurface: Surface? = null
+    private var inputSurface: Surface? = null
+    private var surfaceProcessor: ISurfaceProcessorInternal? = null
     /**
      * Screen size used the last time surfaces were attached.
      * Compared in [isSameAs] so a source is recreated after orientation changes.
@@ -101,18 +108,62 @@ internal class MediaProjectionVideoSource(
         }
     }
 
+    private var outputSurfaceOutput: SurfaceOutput? = null
+
     override suspend fun getOutput() = outputSurface
     override suspend fun setOutput(surface: Surface) {
         outputSurface = surface
         val screenSize = getMediaProjectionSurfaceSize()
         configuredSurfaceSize = screenSize
         if (_isStreamingFlow.value) {
-            virtualDisplay?.surface = surface
+            setupProcessorAndSurfaces(surface, screenSize)
+            // Re-create virtual display if already streaming
+            virtualDisplay?.surface = inputSurface
+        }
+    }
+
+    private fun setupProcessorAndSurfaces(surface: Surface, screenSize: Size) {
+        if (cfrFps > 0) {
+            val processor = surfaceProcessor ?: DefaultSurfaceProcessorFactory(cfrFps).create(
+                context,
+                io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRangeProfile.sdr,
+                dispatcherProvider
+            ).also { surfaceProcessor = it }
+
+            inputSurface?.let { processor.removeInputSurface(it) }
+            outputSurfaceOutput?.let { processor.removeOutputSurface(it) }
+
+            inputSurface = processor.createInputSurface(screenSize, timebase)
+            
+            outputSurfaceOutput = SurfaceOutput(
+                targetSurface = surface,
+                targetResolution = screenSize,
+                targetRotation = 0,
+                isStreaming = { _isStreamingFlow.value },
+                sourceResolution = screenSize,
+                needMirroring = false,
+                sourceInfoProvider = infoProviderFlow.value
+            )
+            processor.addOutputSurface(outputSurfaceOutput!!)
+        } else {
+            inputSurface = surface
         }
     }
 
     override suspend fun resetOutput() {
         stopStream()
+        
+        surfaceProcessor?.let {
+            outputSurfaceOutput?.let { output ->
+                it.removeOutputSurface(output)
+            }
+            inputSurface?.let { input -> it.removeInputSurface(input) }
+            it.release()
+        }
+        
+        surfaceProcessor = null
+        outputSurfaceOutput = null
+        inputSurface = null
         outputSurface = null
         configuredSurfaceSize = null
     }
@@ -123,6 +174,8 @@ internal class MediaProjectionVideoSource(
         val screenSize = getMediaProjectionSurfaceSize()
         configuredSurfaceSize = screenSize
 
+        outputSurface?.let { setupProcessorAndSurfaces(it, screenSize) }
+
         mediaProjection.registerCallback(mediaProjectionCallback, virtualDisplayHandler)
         virtualDisplay = mediaProjection.createVirtualDisplay(
             VIRTUAL_DISPLAY_NAME,
@@ -130,7 +183,7 @@ internal class MediaProjectionVideoSource(
             screenSize.height,
             context.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            outputSurface,
+            inputSurface,
             virtualDisplayCallback,
             virtualDisplayHandler
         )
@@ -140,6 +193,17 @@ internal class MediaProjectionVideoSource(
     override suspend fun stopStream() {
         virtualDisplay?.release()
         virtualDisplay = null
+
+        surfaceProcessor?.let {
+            outputSurfaceOutput?.let { output ->
+                it.removeOutputSurface(output)
+            }
+            inputSurface?.let { input -> it.removeInputSurface(input) }
+            it.release()
+        }
+        surfaceProcessor = null
+        outputSurfaceOutput = null
+        inputSurface = null
 
         try {
             mediaProjection.unregisterCallback(mediaProjectionCallback)
@@ -176,9 +240,11 @@ internal class MediaProjectionVideoSource(
      */
     internal fun isSameAs(
         mediaProjection: MediaProjection,
+        cfrFps: Int,
         overrideRotation: Int?
     ): Boolean {
         if (this.mediaProjection != mediaProjection) return false
+        if (this.cfrFps != cfrFps) return false
         if (this.overrideRotation != overrideRotation) return false
         val configured = configuredSurfaceSize ?: return true
         return configured == getMediaProjectionSurfaceSize()
@@ -202,14 +268,16 @@ internal class MediaProjectionVideoSource(
 }
 
 /**
- * A factory to create a [MediaProjectionVideoSourceFactory].
+ * A factory to create a [MediaProjectionVideoSource].
  *
  * @param mediaProjection The media projection
+ * @param cfrFps Constant frame rate for screen capture. 0 keeps event-driven rendering.
  * @param overrideRotation The override rotation. If null, the rotation is taken from the device orientation. Use this to force a specific rotation of the media projection surface.
  */
 @OptIn(InternalStreamPackApi::class)
 class MediaProjectionVideoSourceFactory(
     private val mediaProjection: MediaProjection,
+    private val cfrFps: Int = 0,
     @RotationValue private val overrideRotation: Int? = null
 ) :
     IVideoSource.Factory {
@@ -220,18 +288,29 @@ class MediaProjectionVideoSourceFactory(
         val source = MediaProjectionVideoSource(
             context,
             mediaProjection,
+            dispatcherProvider,
             dispatcherProvider.createVideoHandlerExecutor(THREAD_NAME_VIRTUAL_DISPLAY),
+            cfrFps,
             overrideRotation
         )
         return source
     }
 
+    /**
+     * True when [source] is already a MediaProjection source with the same token, fps, rotation,
+     * and current screen size.
+     *
+     * VideoInput.setSource skips recreation when this returns true. That does not rebuild the
+     * global SurfaceProcessor; it only skips creating a new source and a new processor input
+     * surface. After orientation changes, [MediaProjectionVideoSource.isSameAs] returns false
+     * so VideoInput creates a new source and attaches a new input surface at the current size.
+     */
     override fun isSourceEquals(source: IVideoSourceInternal?): Boolean {
         return source is MediaProjectionVideoSource &&
-                source.isSameAs(mediaProjection, overrideRotation)
+                source.isSameAs(mediaProjection, cfrFps, overrideRotation)
     }
 
     override fun toString(): String {
-        return "MediaProjectionVideoSourceFactory(mediaProjection=$mediaProjection, overrideRotation=$overrideRotation)"
+        return "MediaProjectionVideoSourceFactory(mediaProjection=$mediaProjection, cfrFps=$cfrFps, overrideRotation=$overrideRotation)"
     }
 }
