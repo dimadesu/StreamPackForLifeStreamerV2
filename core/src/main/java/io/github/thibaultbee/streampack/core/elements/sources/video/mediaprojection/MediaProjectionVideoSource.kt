@@ -65,6 +65,11 @@ internal class MediaProjectionVideoSource(
     override val isStreamingFlow = _isStreamingFlow.asStateFlow()
 
     private var outputSurface: Surface? = null
+    /**
+     * Screen size used the last time surfaces were attached.
+     * Compared in [isSameAs] so a source is recreated after orientation changes.
+     */
+    private var configuredSurfaceSize: Size? = null
 
     private var virtualDisplay: VirtualDisplay? = null
 
@@ -99,17 +104,24 @@ internal class MediaProjectionVideoSource(
     override suspend fun getOutput() = outputSurface
     override suspend fun setOutput(surface: Surface) {
         outputSurface = surface
+        val screenSize = getMediaProjectionSurfaceSize()
+        configuredSurfaceSize = screenSize
+        if (_isStreamingFlow.value) {
+            virtualDisplay?.surface = surface
+        }
     }
 
     override suspend fun resetOutput() {
         stopStream()
         outputSurface = null
+        configuredSurfaceSize = null
     }
 
     override suspend fun configure(config: VideoSourceConfig) = Unit
 
     override suspend fun startStream() {
         val screenSize = getMediaProjectionSurfaceSize()
+        configuredSurfaceSize = screenSize
 
         mediaProjection.registerCallback(mediaProjectionCallback, virtualDisplayHandler)
         virtualDisplay = mediaProjection.createVirtualDisplay(
@@ -151,6 +163,25 @@ internal class MediaProjectionVideoSource(
         } else {
             screenSize
         }
+    }
+
+    /**
+     * Whether this source matches factory parameters and is still sized for the current screen.
+     *
+     * Returning true lets VideoInput skip setSource. That does not rebuild VideoInput's
+     * global SurfaceProcessor; it only skips creating a new source and a new processor input
+     * surface. After an orientation change the stored surface size no longer matches, so the
+     * source is recreated and VideoInput attaches a new input surface at the current screen
+     * dimensions.
+     */
+    internal fun isSameAs(
+        mediaProjection: MediaProjection,
+        overrideRotation: Int?
+    ): Boolean {
+        if (this.mediaProjection != mediaProjection) return false
+        if (this.overrideRotation != overrideRotation) return false
+        val configured = configuredSurfaceSize ?: return true
+        return configured == getMediaProjectionSurfaceSize()
     }
 
     private inner class FullScreenInfoProvider(
@@ -196,7 +227,8 @@ class MediaProjectionVideoSourceFactory(
     }
 
     override fun isSourceEquals(source: IVideoSourceInternal?): Boolean {
-        return source is MediaProjectionVideoSource
+        return source is MediaProjectionVideoSource &&
+                source.isSameAs(mediaProjection, overrideRotation)
     }
 
     override fun toString(): String {
