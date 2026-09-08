@@ -47,6 +47,8 @@ import io.github.thibaultbee.streampack.core.utils.InternalStreamPackApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
+import java.util.Collections
+import java.util.WeakHashMap
 
 @OptIn(InternalStreamPackApi::class)
 internal class MediaProjectionVideoSource(
@@ -191,8 +193,14 @@ internal class MediaProjectionVideoSource(
     }
 
     override suspend fun stopStream() {
+        val hadVirtualDisplay = virtualDisplay != null
         virtualDisplay?.release()
         virtualDisplay = null
+        if (hadVirtualDisplay) {
+            // Android invalidates the token for createVirtualDisplay once its virtual display
+            // is released; remember that so callers don't try to reuse it for video capture.
+            markProjectionExhausted(mediaProjection)
+        }
 
         surfaceProcessor?.let {
             outputSurfaceOutput?.let { output ->
@@ -264,6 +272,25 @@ internal class MediaProjectionVideoSource(
         private const val TAG = "MediaProjectionVideo"
 
         private const val VIRTUAL_DISPLAY_NAME = "StreamPackScreenSource"
+
+        /**
+         * [MediaProjection] instances whose virtual display has already been created and released.
+         * Android forbids calling [MediaProjection.createVirtualDisplay] again on such an instance,
+         * so callers must request a new token instead of reusing it for video capture.
+         */
+        private val exhaustedProjections =
+            Collections.synchronizedSet(Collections.newSetFromMap(WeakHashMap<MediaProjection, Boolean>()))
+
+        private fun markProjectionExhausted(mediaProjection: MediaProjection) {
+            exhaustedProjections.add(mediaProjection)
+        }
+
+        /**
+         * Whether [mediaProjection] has already had a virtual display created and released, and
+         * therefore can no longer be used to start a new screen video capture.
+         */
+        fun isProjectionExhaustedForVideo(mediaProjection: MediaProjection): Boolean =
+            exhaustedProjections.contains(mediaProjection)
     }
 }
 
@@ -312,5 +339,15 @@ class MediaProjectionVideoSourceFactory(
 
     override fun toString(): String {
         return "MediaProjectionVideoSourceFactory(mediaProjection=$mediaProjection, cfrFps=$cfrFps, overrideRotation=$overrideRotation)"
+    }
+
+    companion object {
+        /**
+         * Whether [mediaProjection] has already been used to create a virtual display that was
+         * later stopped. Android forbids reusing such a token for another [MediaProjection.createVirtualDisplay]
+         * call, so callers should request a new token instead of building a source from it.
+         */
+        fun isProjectionExhaustedForVideo(mediaProjection: MediaProjection): Boolean =
+            MediaProjectionVideoSource.isProjectionExhaustedForVideo(mediaProjection)
     }
 }
