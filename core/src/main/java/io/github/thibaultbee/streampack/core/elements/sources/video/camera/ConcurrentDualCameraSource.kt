@@ -78,6 +78,19 @@ class ConcurrentDualCameraSource internal constructor(
     private val _isPreviewingFlow = MutableStateFlow(false)
     override val isPreviewingFlow: StateFlow<Boolean> = _isPreviewingFlow.asStateFlow()
 
+    private var savedConfig: VideoSourceConfig? = null
+
+    private fun computeSecondaryResolution(primaryResolution: Size, mode: CompositionMode): Size {
+        return when (mode) {
+            CompositionMode.SIDE_BY_SIDE, CompositionMode.TOP_BOTTOM -> {
+                if (primaryResolution.width > 1280) Size(1280, 720) else primaryResolution
+            }
+            else -> {
+                if (primaryResolution.width >= 1920) Size(1280, 720) else Size(854, 480)
+            }
+        }
+    }
+
     override fun setSurfaceProcessor(processor: ISurfaceProcessorInternal) {
         this.surfaceProcessor = processor
         processor.compositionMode = compositionMode
@@ -92,7 +105,8 @@ class ConcurrentDualCameraSource internal constructor(
 
         val processor = surfaceProcessor
         if (processor != null) {
-            val secondarySize = Size(1280, 720)
+            val primaryRes = savedConfig?.resolution ?: Size(1920, 1080)
+            val secondarySize = computeSecondaryResolution(primaryRes, compositionMode)
             val secSurface = processor.createInputSurface(secondarySize, secondaryCameraSource.timebase)
             this.secondarySurface = secSurface
             secondaryCameraSource.setOutput(secSurface)
@@ -114,8 +128,9 @@ class ConcurrentDualCameraSource internal constructor(
 
     @RequiresPermission(Manifest.permission.CAMERA)
     override suspend fun configure(config: VideoSourceConfig) {
+        this.savedConfig = config
         primaryCameraSource.configure(config)
-        val secResolution = if (config.resolution.width > 1280) Size(1280, 720) else config.resolution
+        val secResolution = computeSecondaryResolution(config.resolution, compositionMode)
         secondaryCameraSource.configure(config.copy(resolution = secResolution))
     }
 
