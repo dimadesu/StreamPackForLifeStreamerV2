@@ -48,6 +48,12 @@ interface ISurfaceProcessor {
  * You can create your own implementation of this interface to handle custom effects or processing.
  */
 interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
+    /**
+     * The video source currently feeding the processor. Lets the processor query per-input
+     * information (e.g. each camera of a concurrent dual camera source).
+     */
+    var activeVideoSource: Any?
+
     fun createInputSurface(surfaceSize: Size, timebase: Timebase): Surface
 
     fun removeInputSurface(surface: Surface)

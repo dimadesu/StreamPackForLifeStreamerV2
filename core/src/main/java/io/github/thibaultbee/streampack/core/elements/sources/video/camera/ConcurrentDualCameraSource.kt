@@ -149,6 +149,7 @@ class ConcurrentDualCameraSource internal constructor(
     override fun setSurfaceProcessor(processor: ISurfaceProcessorInternal) {
         this.surfaceProcessor = processor
         processor.compositionMode = compositionMode
+        processor.activeVideoSource = this
         attachPreviewOutput()
     }
 

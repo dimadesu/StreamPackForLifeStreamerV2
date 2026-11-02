@@ -53,7 +53,7 @@ private class DefaultSurfaceProcessor(
 ) : ISurfaceProcessorInternal, SurfaceTexture.OnFrameAvailableListener, ISnapshotable {
     override var isMuted: Boolean = false
     override var compositionMode: CompositionMode = CompositionMode.PIP_TOP_RIGHT
-    var activeVideoSource: Any? = null
+    override var activeVideoSource: Any? = null
 
     private val renderer = OpenGlRenderer()
 
