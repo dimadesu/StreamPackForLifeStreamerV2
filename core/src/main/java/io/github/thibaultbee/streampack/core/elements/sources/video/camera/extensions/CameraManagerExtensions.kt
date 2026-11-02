@@ -90,7 +90,9 @@ val CameraManager.concurrentCameraPairs: List<Pair<String, String>>
             return emptyList()
         }
         val concurrentSets = try {
-            concurrentCameraIds
+            @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+            fun getConcurrentSets(mgr: CameraManager) = mgr.concurrentCameraIds
+            getConcurrentSets(this)
         } catch (t: Throwable) {
             emptySet()
         }
@@ -113,9 +115,11 @@ fun CameraManager.isConcurrentStreamingSupported(primaryId: String, secondaryId:
         return false
     }
     return try {
-        concurrentCameraIds.any { set ->
+        @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+        fun checkConcurrent(mgr: CameraManager) = mgr.concurrentCameraIds.any { set ->
             set.contains(primaryId) && set.contains(secondaryId)
         }
+        checkConcurrent(this)
     } catch (t: Throwable) {
         false
     }
