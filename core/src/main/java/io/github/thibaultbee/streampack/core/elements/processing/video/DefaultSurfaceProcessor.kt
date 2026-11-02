@@ -368,6 +368,17 @@ private class DefaultSurfaceProcessor(
         }
     }
 
+    private fun isPrimaryInput(surfaceTexture: SurfaceTexture): Boolean {
+        if (surfaceInputs.size <= 1) return true
+        val dualSource = activeVideoSource as? ConcurrentDualCameraSource
+        return if (dualSource != null) {
+            val input = surfaceInputs.find { it.surfaceTexture == surfaceTexture }
+            input != null && !dualSource.isSecondaryInput(input.surface)
+        } else {
+            surfaceInputs.firstOrNull()?.surfaceTexture == surfaceTexture
+        }
+    }
+
     // Executed on GL thread
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture) {
         if (isReleaseRequested.get()) {
@@ -387,20 +398,23 @@ private class DefaultSurfaceProcessor(
         surfaceTexture.getTransformMatrix(transform)
         surfaceTexture.getTransformMatrix(textureMatrix)
 
-        val timeConverter = surfaceInputsToTimeConverterMap[surfaceTexture]
-        if (timeConverter != null) {
-            latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
+        val isPrimary = isPrimaryInput(surfaceTexture)
+        if (isPrimary) {
+            val timeConverter = surfaceInputsToTimeConverterMap[surfaceTexture]
+            if (timeConverter != null) {
+                latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
+            }
         }
         
         hasFirstFrame = true
 
-        if (cfrFps == 0) {
+        if (cfrFps == 0 && isPrimary) {
             // Standard event-driven render
             renderLatestFrame()
         }
 
         // Surface, size and transform matrix for JPEG Surface if exists
-        if (pendingSnapshots.isNotEmpty()) {
+        if (pendingSnapshots.isNotEmpty() && isPrimary) {
             try {
                 val bitmapSurface =
                     surfaceOutputs.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
