@@ -420,8 +420,7 @@ private class DefaultSurfaceProcessor(
         sourceWidth: Float,
         sourceHeight: Float,
         destWidth: Float,
-        destHeight: Float,
-        isRotated: Boolean
+        destHeight: Float
     ) {
         if (sourceWidth <= 0f || sourceHeight <= 0f || destWidth <= 0f || destHeight <= 0f) return
 
@@ -430,20 +429,14 @@ private class DefaultSurfaceProcessor(
 
         if (kotlin.math.abs(sourceAspect - destAspect) < 0.001f) return
 
-        var scaleX: Float
-        var scaleY: Float
+        val scaleX: Float
+        val scaleY: Float
         if (sourceAspect > destAspect) {
             scaleX = destAspect / sourceAspect
             scaleY = 1.0f
         } else {
             scaleX = 1.0f
             scaleY = sourceAspect / destAspect
-        }
-
-        if (isRotated) {
-            val temp = scaleX
-            scaleX = scaleY
-            scaleY = temp
         }
 
         android.opengl.Matrix.translateM(matrix, 0, 0.5f, 0.5f, 0f)
@@ -484,7 +477,7 @@ private class DefaultSurfaceProcessor(
                     val sourceWidth = if (isRotated) sourceSize.height.toFloat() else sourceSize.width.toFloat()
                     val sourceHeight = if (isRotated) sourceSize.width.toFloat() else sourceSize.height.toFloat()
 
-                    applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight, isRotated)
+                    applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight)
 
                     OpenGlRenderer.RenderInput(
                         textureId = input.textureId,

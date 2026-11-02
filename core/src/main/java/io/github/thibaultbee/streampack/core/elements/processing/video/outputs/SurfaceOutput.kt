@@ -157,6 +157,11 @@ class SurfaceOutput(
         invertedTransform: FloatArray,
         sourceInfoProvider: ISourceInfoProvider
     ) {
+        val currentRotationDegrees = sourceInfoProvider.getRelativeRotationDegrees(
+            targetRotation,
+            sourceInfoProvider.isMirror
+        )
+
         Matrix.setIdentityM(additionalTransform, 0)
 
         // Step 1, calculate the overall transformation(A * B) with the following steps:
@@ -169,10 +174,10 @@ class SurfaceOutput(
         additionalTransform.preVerticalFlip(0.5f)
 
         // Rotation
-        additionalTransform.preRotate(rotationDegrees.toFloat(), 0.5f, 0.5f)
+        additionalTransform.preRotate(currentRotationDegrees.toFloat(), 0.5f, 0.5f)
 
         // Mirroring
-        if (needMirroring) {
+        if (sourceInfoProvider.isMirror) {
             Matrix.translateM(additionalTransform, 0, 1f, 0f, 0f)
             Matrix.scaleM(additionalTransform, 0, -1f, 1f, 1f)
         }
@@ -212,7 +217,7 @@ class SurfaceOutput(
         // Applies the camera sensor orientation if the input surface contains camera transform.
         // Rotation
         invertedTextureTransform.preRotate(
-            sourceRotationDegrees.toFloat(),
+            sourceInfoProvider.rotationDegrees.toFloat(),
             0.5f,
             0.5f
         )

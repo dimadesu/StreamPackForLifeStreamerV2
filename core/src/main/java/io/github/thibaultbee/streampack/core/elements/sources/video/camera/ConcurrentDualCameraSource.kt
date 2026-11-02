@@ -76,9 +76,13 @@ class ConcurrentDualCameraSource internal constructor(
 
     fun getInfoProvider(index: Int): io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider {
         return if (index == 1) {
-            secondaryCameraSource.infoProviderFlow.value
+            object : io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider by secondaryCameraSource.infoProviderFlow.value { 
+                override fun getSurfaceSize(targetResolution: android.util.Size) = computeSecondaryResolution(savedConfig?.resolution ?: android.util.Size(1920, 1080), compositionMode) 
+            }
         } else {
-            primaryCameraSource.infoProviderFlow.value
+            object : io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider by primaryCameraSource.infoProviderFlow.value { 
+                override fun getSurfaceSize(targetResolution: android.util.Size) = savedConfig?.resolution ?: android.util.Size(1920, 1080)
+            }
         }
     }
 
