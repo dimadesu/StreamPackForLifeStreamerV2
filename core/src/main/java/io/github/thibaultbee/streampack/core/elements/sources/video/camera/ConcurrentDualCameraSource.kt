@@ -119,13 +119,42 @@ class ConcurrentDualCameraSource internal constructor(
     private var areCamerasActive = false
 
     private fun computeSecondaryResolution(primaryResolution: Size, mode: CompositionMode): Size {
-        return when (mode) {
+        val desired = when (mode) {
             CompositionMode.SIDE_BY_SIDE, CompositionMode.TOP_BOTTOM -> {
                 if (primaryResolution.width > 1280) Size(1280, 720) else primaryResolution
             }
             else -> {
                 if (primaryResolution.width >= 1920) Size(1280, 720) else Size(854, 480)
             }
+        }
+        return closestSupportedSize(secondaryCameraSource.cameraId, desired)
+    }
+
+    /**
+     * Returns [desired] if the camera supports it, otherwise the supported size with the same
+     * aspect ratio and the closest area. The camera would otherwise pick an arbitrary size with
+     * another aspect ratio and the frame would be distorted.
+     */
+    private fun closestSupportedSize(cameraId: String, desired: Size): Size {
+        return try {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+            val sizes = manager.getCameraCharacteristics(cameraId)
+                .get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?.getOutputSizes(android.graphics.SurfaceTexture::class.java)
+                ?.toList()
+                .orEmpty()
+            if (sizes.isEmpty() || sizes.contains(desired)) {
+                return desired
+            }
+            val desiredRatio = desired.width.toFloat() / desired.height
+            val desiredArea = desired.width * desired.height
+            sizes.minWith(
+                compareBy<Size> { kotlin.math.abs(it.width.toFloat() / it.height - desiredRatio) }
+                    .thenBy { kotlin.math.abs(it.width * it.height - desiredArea) }
+            )
+        } catch (t: Throwable) {
+            Logger.w(TAG, "Failed to query sizes for camera $cameraId: ${t.message}")
+            desired
         }
     }
 
