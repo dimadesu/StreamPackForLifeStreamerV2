@@ -82,6 +82,46 @@ val CameraManager.externalCameras: List<String>
         }
 
 /**
+ * Gets a list of compatible front and rear camera ID pairs that support concurrent camera streaming (API 30+).
+ */
+val CameraManager.concurrentCameraPairs: List<Pair<String, String>>
+    get() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return emptyList()
+        }
+        val concurrentSets = try {
+            concurrentCameraIds
+        } catch (t: Throwable) {
+            emptySet()
+        }
+        val validPairs = mutableListOf<Pair<String, String>>()
+        for (set in concurrentSets) {
+            val backId = set.firstOrNull { isBackCamera(it) }
+            val frontId = set.firstOrNull { isFrontCamera(it) }
+            if (backId != null && frontId != null) {
+                validPairs.add(Pair(backId, frontId))
+            }
+        }
+        return validPairs
+    }
+
+/**
+ * Checks if the given primary and secondary cameras can be streamed concurrently (API 30+).
+ */
+fun CameraManager.isConcurrentStreamingSupported(primaryId: String, secondaryId: String): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+        return false
+    }
+    return try {
+        concurrentCameraIds.any { set ->
+            set.contains(primaryId) && set.contains(secondaryId)
+        }
+    } catch (t: Throwable) {
+        false
+    }
+}
+
+/**
  * Whether the [cameraId] is a back camera id
  *
  * @return true if string is a back camera id, otherwise false

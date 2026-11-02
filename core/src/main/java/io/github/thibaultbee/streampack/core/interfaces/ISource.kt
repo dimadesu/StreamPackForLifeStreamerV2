@@ -88,6 +88,28 @@ suspend fun IWithVideoSource.setCameraId(cameraId: String) {
     videoInput.setSource(CameraSourceFactory(cameraId))
 }
 
+/**
+ * Sets concurrent dual camera streaming (primary + secondary camera with specified composition layout).
+ *
+ * @param primaryCameraId the primary camera id (e.g. rear)
+ * @param secondaryCameraId the secondary camera id (e.g. front)
+ * @param compositionMode the composition layout mode (defaults to PiP Top-Right)
+ */
+@RequiresPermission(Manifest.permission.CAMERA)
+suspend fun IWithVideoSource.setConcurrentDualCamera(
+    primaryCameraId: String,
+    secondaryCameraId: String,
+    compositionMode: io.github.thibaultbee.streampack.core.elements.processing.video.CompositionMode = io.github.thibaultbee.streampack.core.elements.processing.video.CompositionMode.PIP_TOP_RIGHT
+) {
+    videoInput.setSource(
+        io.github.thibaultbee.streampack.core.elements.sources.video.camera.ConcurrentDualCameraSourceFactory(
+            primaryCameraId,
+            secondaryCameraId,
+            compositionMode
+        )
+    )
+}
+
 
 /**
  * Whether the video source has a preview.

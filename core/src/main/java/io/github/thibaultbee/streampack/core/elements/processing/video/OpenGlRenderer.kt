@@ -18,6 +18,8 @@ package io.github.thibaultbee.streampack.core.elements.processing.video
 
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.graphics.RectF
+import kotlin.math.roundToInt
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
@@ -221,6 +223,26 @@ class OpenGlRenderer {
         }
 
     /**
+     * Creates an additional texture name for secondary input streams.
+     */
+    fun createTextureName(): Int {
+        checkInitializedOrThrow(mInitialized, true)
+        checkGlThreadOrThrow(mGlThread)
+        val textureId = createTexture()
+        useAndConfigureProgramWithTexture(textureId)
+        return textureId
+    }
+
+    /**
+     * Deletes an additional texture name.
+     */
+    fun deleteTextureName(textureId: Int) {
+        checkInitializedOrThrow(mInitialized, true)
+        checkGlThreadOrThrow(mGlThread)
+        deleteTexture(textureId)
+    }
+
+    /**
      * Sets the input format.
      *
      *
@@ -249,15 +271,20 @@ class OpenGlRenderer {
     }
 
     /**
-     * Renders the texture image to the output surface.
-     *
-     * @throws IllegalStateException if the renderer is not initialized, the caller doesn't run
-     * on the GL thread or the surface is not registered by
-     * [.registerOutputSurface].
+     * Data class holding frame rendering configuration for an input stream.
      */
-    fun render(
+    data class RenderInput(
+        val textureId: Int,
+        val textureTransform: FloatArray,
+        val targetRectNorm: RectF = RectF(0f, 0f, 1f, 1f)
+    )
+
+    /**
+     * Renders multiple input textures onto the output surface according to their normalized target rectangles.
+     */
+    fun renderInputs(
         timestampNs: Long,
-        textureTransform: FloatArray,
+        inputs: List<RenderInput>,
         surface: Surface,
         isMuted: Boolean = false
     ) {
@@ -278,39 +305,58 @@ class OpenGlRenderer {
 
         requireNotNull(outputSurface)
 
-        // Set output surface.
         if (surface !== mCurrentSurface) {
             makeCurrent(outputSurface.eglSurface)
             mCurrentSurface = surface
+        }
+
+        val surfaceWidth = outputSurface.viewPortRect.width()
+        val surfaceHeight = outputSurface.viewPortRect.height()
+
+        if (isMuted || inputs.isEmpty()) {
             GLES20.glViewport(
                 outputSurface.viewPortRect.left,
                 outputSurface.viewPortRect.top,
-                outputSurface.viewPortRect.width(),
-                outputSurface.viewPortRect.height()
+                surfaceWidth,
+                surfaceHeight
             )
-            GLES20.glScissor(
-                outputSurface.viewPortRect.left,
-                outputSurface.viewPortRect.top,
-                outputSurface.viewPortRect.width(),
-                outputSurface.viewPortRect.height()
-            )
-        }
-
-
-        if (isMuted) {
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         } else {
-            // TODO(b/245855601): Upload the matrix to GPU when textureTransform is changed.
-            val program: Program2D = requireNotNull(mCurrentProgram)
-            if (program is SamplerShaderProgram) {
-                // Copy the texture transformation matrix over.
-                program.updateTextureMatrix(textureTransform)
+            inputs.forEach { input ->
+                val rect = input.targetRectNorm
+                val isFullScreen = rect.left == 0f && rect.top == 0f && rect.right == 1f && rect.bottom == 1f
+
+                if (isFullScreen) {
+                    GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+                    GLES20.glViewport(
+                        outputSurface.viewPortRect.left,
+                        outputSurface.viewPortRect.top,
+                        surfaceWidth,
+                        surfaceHeight
+                    )
+                } else {
+                    val glLeft = outputSurface.viewPortRect.left + (rect.left * surfaceWidth).roundToInt()
+                    val glBottom = outputSurface.viewPortRect.top + ((1f - rect.bottom) * surfaceHeight).roundToInt()
+                    val glWidth = ((rect.right - rect.left) * surfaceWidth).roundToInt()
+                    val glHeight = ((rect.bottom - rect.top) * surfaceHeight).roundToInt()
+
+                    GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
+                    GLES20.glScissor(glLeft, glBottom, glWidth, glHeight)
+                    GLES20.glViewport(glLeft, glBottom, glWidth, glHeight)
+                }
+
+                useAndConfigureProgramWithTexture(input.textureId)
+                val program: Program2D = requireNotNull(mCurrentProgram)
+                if (program is SamplerShaderProgram) {
+                    program.updateTextureMatrix(input.textureTransform)
+                }
+
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                checkGlErrorOrThrow("glDrawArrays")
             }
 
-            // Draw the rect.
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP,  /*firstVertex=*/0,  /*vertexCount=*/4)
-            checkGlErrorOrThrow("glDrawArrays")
+            GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
         }
 
         // Set timestamp
@@ -325,6 +371,23 @@ class OpenGlRenderer {
             )
             removeOutputSurfaceInternal(surface, false)
         }
+    }
+
+    /**
+     * Renders the primary texture image to the output surface.
+     */
+    fun render(
+        timestampNs: Long,
+        textureTransform: FloatArray,
+        surface: Surface,
+        isMuted: Boolean = false
+    ) {
+        renderInputs(
+            timestampNs,
+            listOf(RenderInput(mExternalTextureId, textureTransform)),
+            surface,
+            isMuted
+        )
     }
 
     /**

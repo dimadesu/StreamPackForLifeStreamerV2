@@ -32,6 +32,11 @@ interface ISurfaceProcessor {
      * The video stream will be replaced by a black screen.
      */
     var isMuted: Boolean
+
+    /**
+     * The composition layout mode for multi-input rendering.
+     */
+    var compositionMode: CompositionMode
 }
 
 /**

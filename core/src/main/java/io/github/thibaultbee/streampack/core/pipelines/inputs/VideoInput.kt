@@ -25,6 +25,7 @@ import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.I
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
 import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.sources.video.IPreviewableSource
+import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProcessorAwareSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceSourceInternal
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal
@@ -366,6 +367,9 @@ internal class VideoInput(
         surfaceProcessor: ISurfaceProcessorInternal,
         videoSource: IVideoSourceInternal? = sourceInternalFlow.value,
     ) {
+        if (videoSource is ISurfaceProcessorAwareSource) {
+            videoSource.setSurfaceProcessor(surfaceProcessor)
+        }
         // Adds surface processor input
         if (videoSource is ISurfaceSourceInternal) {
             videoSource.setOutput(

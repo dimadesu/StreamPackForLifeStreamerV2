@@ -17,6 +17,7 @@
 package io.github.thibaultbee.streampack.core.elements.processing.video
 
 import android.graphics.Bitmap
+import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.util.Size
 import android.view.Surface
@@ -49,6 +50,7 @@ private class DefaultSurfaceProcessor(
     private val cfrFps: Int = 0
 ) : ISurfaceProcessorInternal, SurfaceTexture.OnFrameAvailableListener, ISnapshotable {
     override var isMuted: Boolean = false
+    override var compositionMode: CompositionMode = CompositionMode.PIP_TOP_RIGHT
 
     private val renderer = OpenGlRenderer()
 
@@ -64,6 +66,7 @@ private class DefaultSurfaceProcessor(
     private val surfaceInputs: MutableList<SurfaceInput> = mutableListOf()
     private val surfaceInputsToTimeConverterMap: MutableMap<SurfaceTexture, VideoTimebaseConverter> =
         hashMapOf()
+    private val surfaceInputsToMatrixMap: MutableMap<SurfaceTexture, FloatArray> = hashMapOf()
 
     // CFR Render loop state
     @Volatile private var latestTimestampNs: Long = 0L
@@ -128,7 +131,13 @@ private class DefaultSurfaceProcessor(
                 throw IllegalStateException("SurfaceProcessor is released")
             }
 
-            val surfaceTexture = SurfaceTexture(renderer.textureName)
+            val textureId = if (surfaceInputs.isEmpty()) {
+                renderer.textureName
+            } else {
+                renderer.createTextureName()
+            }
+
+            val surfaceTexture = SurfaceTexture(textureId)
             surfaceTexture.setDefaultBufferSize(surfaceSize.width, surfaceSize.height)
             surfaceTexture.setOnFrameAvailableListener(this, glHandler)
             if (dynamicRangeProfile.isHdr) {
@@ -139,7 +148,8 @@ private class DefaultSurfaceProcessor(
                 timebase,
                 TimeUtils.systemTimeProvider
             )
-            SurfaceInput(Surface(surfaceTexture), surfaceTexture)
+            surfaceInputsToMatrixMap[surfaceTexture] = FloatArray(16)
+            SurfaceInput(Surface(surfaceTexture), surfaceTexture, textureId)
         }
 
         val surfaceInput = future.get()
@@ -171,7 +181,12 @@ private class DefaultSurfaceProcessor(
                 surfaceTexture.release()
                 surface.release()
 
+                if (surfaceInput.textureId != renderer.textureName) {
+                    renderer.deleteTextureName(surfaceInput.textureId)
+                }
+
                 surfaceInputsToTimeConverterMap.remove(surfaceTexture)
+                surfaceInputsToMatrixMap.remove(surfaceTexture)
                 surfaceInputs.remove(surfaceInput)
 
                 if (surfaceInputs.isEmpty() && isRenderLoopRunning) {
@@ -363,6 +378,8 @@ private class DefaultSurfaceProcessor(
             Logger.w(TAG, "updateTexImage failed (surface likely released): ${e.message}")
             return
         }
+        val transform = surfaceInputsToMatrixMap[surfaceTexture] ?: FloatArray(16)
+        surfaceTexture.getTransformMatrix(transform)
         surfaceTexture.getTransformMatrix(textureMatrix)
 
         val timeConverter = surfaceInputsToTimeConverterMap[surfaceTexture]
@@ -397,7 +414,7 @@ private class DefaultSurfaceProcessor(
 
     // Executed on GL thread continuously (CFR) or onFrameAvailable (Event-driven)
     private fun renderLatestFrame() {
-        if (!hasFirstFrame) return
+        if (!hasFirstFrame || surfaceInputs.isEmpty()) return
 
         val renderTimestampNs = if (cfrFps > 0) {
             System.nanoTime()
@@ -405,14 +422,31 @@ private class DefaultSurfaceProcessor(
             latestTimestampNs
         }
 
-        surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach {
+        val targetRects = compositionMode.getNormalizedRects(surfaceInputs.size)
+
+        val renderInputs = surfaceInputs.mapIndexed { index, input ->
+            val transform = surfaceInputsToMatrixMap[input.surfaceTexture] ?: FloatArray(16)
+            val rectNorm = targetRects.getOrElse(index) { RectF(0f, 0f, 1f, 1f) }
+            OpenGlRenderer.RenderInput(
+                textureId = input.textureId,
+                textureTransform = transform,
+                targetRectNorm = rectNorm
+            )
+        }
+
+        surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach { output ->
             try {
-                it.updateTransformMatrix(surfaceOutputMatrix, textureMatrix)
-                if (it.isStreaming()) {
-                    renderer.render(
+                val transformedInputs = renderInputs.map { input ->
+                    val outputMatrix = FloatArray(16)
+                    output.updateTransformMatrix(outputMatrix, input.textureTransform)
+                    input.copy(textureTransform = outputMatrix)
+                }
+
+                if (output.isStreaming()) {
+                    renderer.renderInputs(
                         renderTimestampNs,
-                        surfaceOutputMatrix,
-                        it.targetSurface,
+                        transformedInputs,
+                        output.targetSurface,
                         isMuted
                     )
                 }
@@ -518,7 +552,7 @@ private class DefaultSurfaceProcessor(
         private const val TAG = "SurfaceProcessor"
     }
 
-    private data class SurfaceInput(val surface: Surface, val surfaceTexture: SurfaceTexture)
+    private data class SurfaceInput(val surface: Surface, val surfaceTexture: SurfaceTexture, val textureId: Int)
 
     private data class PendingSnapshot(
         @IntRange(from = 0, to = 359)
