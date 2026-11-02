@@ -24,6 +24,7 @@ import androidx.annotation.RequiresPermission
 import io.github.thibaultbee.streampack.core.elements.processing.video.CompositionMode
 import io.github.thibaultbee.streampack.core.elements.processing.video.ISurfaceProcessorInternal
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
+import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.sources.video.AbstractPreviewableSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProcessorAwareSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceSourceInternal
@@ -31,6 +32,7 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.VideoSourceConfig
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CameraDispatcherProvider
 import io.github.thibaultbee.streampack.core.elements.utils.extensions.displayRotation
+import io.github.thibaultbee.streampack.core.elements.utils.extensions.rotate
 import io.github.thibaultbee.streampack.core.logger.Logger
 import io.github.thibaultbee.streampack.core.pipelines.DispatcherProvider.Companion.THREAD_NAME_CAMERA
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
@@ -74,17 +76,21 @@ class ConcurrentDualCameraSource internal constructor(
     override val infoProviderFlow
         get() = primaryCameraSource.infoProviderFlow
 
-    fun getInfoProvider(index: Int): io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider {
-        return if (index == 1) {
-            object : io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider by secondaryCameraSource.infoProviderFlow.value { 
-                override fun getSurfaceSize(targetResolution: android.util.Size) = computeSecondaryResolution(savedConfig?.resolution ?: android.util.Size(1920, 1080), compositionMode) 
-            }
+    /**
+     * Returns the info provider of the camera feeding [inputSurface].
+     */
+    fun getInfoProvider(inputSurface: Surface): ISourceInfoProvider {
+        return if (isSecondaryInput(inputSurface)) {
+            secondaryCameraSource.infoProviderFlow.value
         } else {
-            object : io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider by primaryCameraSource.infoProviderFlow.value { 
-                override fun getSurfaceSize(targetResolution: android.util.Size) = savedConfig?.resolution ?: android.util.Size(1920, 1080)
-            }
+            primaryCameraSource.infoProviderFlow.value
         }
     }
+
+    /**
+     * Whether [inputSurface] is the processor input fed by the secondary (PiP) camera.
+     */
+    fun isSecondaryInput(inputSurface: Surface) = inputSurface == secondarySurface
 
     private var surfaceProcessor: ISurfaceProcessorInternal? = null
     private var primarySurface: Surface? = null
@@ -142,14 +148,21 @@ class ConcurrentDualCameraSource internal constructor(
         // The processor drops its outputs when the input resolution changes: always re-add.
         detachPreviewOutput()
         try {
+            val rotation = context.displayRotation
+            val baseProvider = infoProviderFlow.value
+            // The composited frame is already upright and sized as the preview: no letterboxing.
+            val previewInfoProvider = object : ISourceInfoProvider by baseProvider {
+                override fun getSurfaceSize(targetResolution: Size) =
+                    targetResolution.rotate(baseProvider.getRelativeRotationDegrees(rotation, false))
+            }
             val output = SurfaceOutput(
                 targetSurface = surface,
                 targetResolution = size,
-                targetRotation = context.displayRotation,
+                targetRotation = rotation,
                 isStreaming = { true },
                 sourceResolution = size,
                 needMirroring = false,
-                sourceInfoProvider = infoProviderFlow.value
+                sourceInfoProvider = previewInfoProvider
             )
             processor.addOutputSurface(output)
             previewOutput = output

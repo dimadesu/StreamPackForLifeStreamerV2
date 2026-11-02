@@ -151,7 +151,8 @@ private class DefaultSurfaceProcessor(
                 TimeUtils.systemTimeProvider
             )
             surfaceInputsToMatrixMap[surfaceTexture] = FloatArray(16)
-            val surfaceInput = SurfaceInput(Surface(surfaceTexture), surfaceTexture, textureId)
+            val surfaceInput =
+                SurfaceInput(Surface(surfaceTexture), surfaceTexture, textureId, surfaceSize)
             surfaceInputs.add(surfaceInput)
             surfaceInput
         }
@@ -454,24 +455,39 @@ private class DefaultSurfaceProcessor(
             latestTimestampNs
         }
 
-        val targetRects = compositionMode.getNormalizedRects(surfaceInputs.size)
+        val dualSource = activeVideoSource as? ConcurrentDualCameraSource
+        // Rects are ordered primary first, secondary (drawn on top) last.
+        val orderedInputs = if (dualSource != null) {
+            surfaceInputs.sortedBy { if (dualSource.isSecondaryInput(it.surface)) 1 else 0 }
+        } else {
+            surfaceInputs
+        }
+        val targetRects = compositionMode.getNormalizedRects(orderedInputs.size)
 
         surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach { output ->
             try {
-                val transformedInputs = surfaceInputs.mapIndexed { index, input ->
+                val transformedInputs = orderedInputs.mapIndexed { index, input ->
                     val rawTransform = surfaceInputsToMatrixMap[input.surfaceTexture] ?: FloatArray(16)
                     val rectNorm = targetRects.getOrElse(index) { RectF(0f, 0f, 1f, 1f) }
 
-                    val dualSource = activeVideoSource as? ConcurrentDualCameraSource
-                    val infoProvider = dualSource?.getInfoProvider(index) ?: output.sourceInfoProvider
+                    // Match the provider and buffer size to the actual input surface: the input
+                    // order is not guaranteed to match the camera order after a camera switch.
+                    val infoProvider = dualSource?.getInfoProvider(input.surface)
+                        ?: output.sourceInfoProvider
 
                     val outputMatrix = FloatArray(16)
                     output.updateTransformMatrix(outputMatrix, rawTransform, infoProvider)
 
-                    val destWidth = rectNorm.width() * output.targetResolution.width
-                    val destHeight = rectNorm.height() * output.targetResolution.height
+                    // Rects are relative to the output viewport, which may be letterboxed.
+                    val viewport = output.viewportRect
+                    val destWidth = rectNorm.width() * viewport.width()
+                    val destHeight = rectNorm.height() * viewport.height()
 
-                    val sourceSize = infoProvider.getSurfaceSize(output.targetResolution)
+                    val sourceSize = if (dualSource != null) {
+                        input.bufferSize
+                    } else {
+                        infoProvider.getSurfaceSize(output.targetResolution)
+                    }
                     val rot = infoProvider.getRelativeRotationDegrees(output.targetRotation, infoProvider.isMirror)
                     val isRotated = (rot % 180) != 0
                     val sourceWidth = if (isRotated) sourceSize.height.toFloat() else sourceSize.width.toFloat()
@@ -596,7 +612,12 @@ private class DefaultSurfaceProcessor(
         private const val TAG = "SurfaceProcessor"
     }
 
-    private data class SurfaceInput(val surface: Surface, val surfaceTexture: SurfaceTexture, val textureId: Int)
+    private data class SurfaceInput(
+        val surface: Surface,
+        val surfaceTexture: SurfaceTexture,
+        val textureId: Int,
+        val bufferSize: Size
+    )
 
     private data class PendingSnapshot(
         @IntRange(from = 0, to = 359)
