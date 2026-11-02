@@ -23,25 +23,31 @@ import android.view.Surface
 import androidx.annotation.RequiresPermission
 import io.github.thibaultbee.streampack.core.elements.processing.video.CompositionMode
 import io.github.thibaultbee.streampack.core.elements.processing.video.ISurfaceProcessorInternal
+import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
 import io.github.thibaultbee.streampack.core.elements.sources.video.AbstractPreviewableSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProcessorAwareSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceSourceInternal
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal
 import io.github.thibaultbee.streampack.core.elements.sources.video.VideoSourceConfig
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CameraDispatcherProvider
+import io.github.thibaultbee.streampack.core.elements.utils.extensions.displayRotation
 import io.github.thibaultbee.streampack.core.logger.Logger
 import io.github.thibaultbee.streampack.core.pipelines.DispatcherProvider.Companion.THREAD_NAME_CAMERA
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * A video source that captures video from two cameras concurrently (e.g. front and rear)
  * and composites them into a single frame using OpenGL.
  */
 class ConcurrentDualCameraSource internal constructor(
-    context: Context,
+    private val context: Context,
     internal val primaryCameraSource: CameraSource,
     internal val secondaryCameraSource: CameraSource,
     var compositionMode: CompositionMode = CompositionMode.PIP_TOP_RIGHT
@@ -80,6 +86,20 @@ class ConcurrentDualCameraSource internal constructor(
 
     private var savedConfig: VideoSourceConfig? = null
 
+    /**
+     * The preview shows the composited frame rendered by the surface processor, not the raw
+     * primary camera frames. It is attached to the processor as an additional output.
+     */
+    private var previewSurface: Surface? = null
+    private var previewOutput: SurfaceOutput? = null
+    private var previewSize: Size? = null
+
+    // Cameras must feed the processor while previewing, even when not streaming.
+    private val camerasMutex = Mutex()
+    private var isStreamRequested = false
+    private var isPreviewRequested = false
+    private var areCamerasActive = false
+
     private fun computeSecondaryResolution(primaryResolution: Size, mode: CompositionMode): Size {
         return when (mode) {
             CompositionMode.SIDE_BY_SIDE, CompositionMode.TOP_BOTTOM -> {
@@ -94,6 +114,54 @@ class ConcurrentDualCameraSource internal constructor(
     override fun setSurfaceProcessor(processor: ISurfaceProcessorInternal) {
         this.surfaceProcessor = processor
         processor.compositionMode = compositionMode
+        attachPreviewOutput()
+    }
+
+    private fun detachPreviewOutput() {
+        previewOutput?.let { surfaceProcessor?.removeOutputSurface(it) }
+        previewOutput = null
+    }
+
+    private fun attachPreviewOutput() {
+        val processor = surfaceProcessor ?: return
+        val surface = previewSurface ?: return
+        val size = previewSize ?: return
+
+        // The processor drops its outputs when the input resolution changes: always re-add.
+        detachPreviewOutput()
+        try {
+            val output = SurfaceOutput(
+                targetSurface = surface,
+                targetResolution = size,
+                targetRotation = context.displayRotation,
+                isStreaming = { true },
+                sourceResolution = size,
+                needMirroring = false,
+                sourceInfoProvider = infoProviderFlow.value
+            )
+            processor.addOutputSurface(output)
+            previewOutput = output
+        } catch (t: Throwable) {
+            Logger.w(TAG, "Failed to attach preview output: ${t.message}")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun updateCamerasState() = camerasMutex.withLock {
+        val isNeeded = isStreamRequested || isPreviewRequested
+        if (isNeeded && !areCamerasActive) {
+            primaryCameraSource.startStream()
+            try {
+                secondaryCameraSource.startStream()
+            } catch (t: Throwable) {
+                Logger.e(TAG, "Failed to start secondary camera stream in concurrent mode", t)
+            }
+            areCamerasActive = true
+        } else if (!isNeeded && areCamerasActive) {
+            primaryCameraSource.stopStream()
+            secondaryCameraSource.stopStream()
+            areCamerasActive = false
+        }
     }
 
     override suspend fun getOutput(): Surface? = primarySurface
@@ -113,10 +181,12 @@ class ConcurrentDualCameraSource internal constructor(
         } else {
             Logger.w(TAG, "SurfaceProcessor not set on ConcurrentDualCameraSource when setting output")
         }
+        attachPreviewOutput()
     }
 
     @SuppressLint("MissingPermission")
     override suspend fun resetOutputImpl() {
+        detachPreviewOutput()
         primaryCameraSource.resetOutput()
         secondaryCameraSource.resetOutput()
         secondarySurface?.let {
@@ -134,59 +204,75 @@ class ConcurrentDualCameraSource internal constructor(
         secondaryCameraSource.configure(config.copy(resolution = secResolution))
     }
 
+    /**
+     * The preview is the composited frame, already rotated upright: returns a size with the
+     * orientation of [targetSize] instead of a sensor size.
+     */
     override fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size {
-        return primaryCameraSource.getPreviewSize(targetSize, targetClass)
+        val scale = minOf(1f, MAX_PREVIEW_DIMENSION.toFloat() / max(targetSize.width, targetSize.height))
+        val size = Size(
+            (targetSize.width * scale).roundToInt().coerceAtLeast(2) and 1.inv(),
+            (targetSize.height * scale).roundToInt().coerceAtLeast(2) and 1.inv()
+        )
+        previewSize = size
+        return size
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
     override suspend fun startStream() {
-        primaryCameraSource.startStream()
-        try {
-            secondaryCameraSource.startStream()
-        } catch (t: Throwable) {
-            Logger.e(TAG, "Failed to start secondary camera stream in concurrent mode", t)
-        }
+        isStreamRequested = true
+        updateCamerasState()
         _isStreamingFlow.value = true
     }
 
     override suspend fun stopStream() {
-        primaryCameraSource.stopStream()
-        secondaryCameraSource.stopStream()
+        isStreamRequested = false
+        updateCamerasState()
         _isStreamingFlow.value = false
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
     override suspend fun startPreview() {
-        primaryCameraSource.startPreview()
+        isPreviewRequested = true
         try {
-            secondaryCameraSource.startPreview()
+            updateCamerasState()
         } catch (t: Throwable) {
-            Logger.w(TAG, "Failed to start secondary camera preview: ${t.message}")
+            Logger.w(TAG, "Failed to start cameras for preview: ${t.message}")
         }
         _isPreviewingFlow.value = true
     }
 
     override suspend fun stopPreview() {
-        primaryCameraSource.stopPreview()
-        secondaryCameraSource.stopPreview()
+        isPreviewRequested = false
+        try {
+            updateCamerasState()
+        } catch (t: Throwable) {
+            Logger.w(TAG, "Failed to stop cameras after preview: ${t.message}")
+        }
         _isPreviewingFlow.value = false
     }
 
-    override suspend fun hasPreview(): Boolean {
-        return primaryCameraSource.hasPreview()
-    }
+    override suspend fun hasPreview(): Boolean = previewSurface != null
 
     @RequiresPermission(Manifest.permission.CAMERA)
     override suspend fun setPreview(surface: Surface) {
-        primaryCameraSource.setPreview(surface)
+        previewSurface = surface
+        if (previewSize == null) {
+            previewSize = savedConfig?.resolution
+        }
+        attachPreviewOutput()
     }
 
     @SuppressLint("MissingPermission")
     override suspend fun resetPreviewImpl() {
-        primaryCameraSource.resetPreview()
+        detachPreviewOutput()
+        previewSurface = null
     }
 
     override suspend fun release() {
+        isStreamRequested = false
+        isPreviewRequested = false
+        areCamerasActive = false
         try {
             primaryCameraSource.stopStream()
         } catch (_: Throwable) {}
@@ -206,6 +292,7 @@ class ConcurrentDualCameraSource internal constructor(
 
     companion object {
         private const val TAG = "ConcurrentDualCameraSource"
+        private const val MAX_PREVIEW_DIMENSION = 1280
     }
 }
 

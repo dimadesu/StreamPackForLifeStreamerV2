@@ -43,6 +43,7 @@ import androidx.core.content.ContextCompat
 import io.github.thibaultbee.streampack.core.elements.sources.video.IPreviewableSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraSettings
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraSettings.FocusMetering.Companion.DEFAULT_AUTO_CANCEL_DURATION_MS
+import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ConcurrentDualCameraSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ICameraSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.getCameraCharacteristics
 import io.github.thibaultbee.streampack.core.elements.utils.ConflatedJob
@@ -482,7 +483,8 @@ class PreviewView @JvmOverloads constructor(
         val previewSize = getPreviewSize(videoSource, size)
         Logger.i(TAG, "Starting preview with size ($previewSize) for ($size)")
         val builder = ViewfinderSurfaceRequest.Builder(previewSize)
-        if (videoSource is ICameraSource) {
+        // The concurrent source previews the composited frame, which is already upright.
+        if (videoSource is ICameraSource && videoSource !is ConcurrentDualCameraSource) {
             val cameraCharacteristics =
                 context.getCameraCharacteristics(videoSource.cameraId)
             builder.populateFromCharacteristics(cameraCharacteristics)
