@@ -172,8 +172,21 @@ class ConcurrentDualCameraSource internal constructor(
     }
 
     override suspend fun release() {
-        primaryCameraSource.release()
-        secondaryCameraSource.release()
+        try {
+            primaryCameraSource.stopStream()
+        } catch (_: Throwable) {}
+        try {
+            secondaryCameraSource.stopStream()
+        } catch (_: Throwable) {}
+
+        resetOutputImpl()
+
+        try {
+            primaryCameraSource.release()
+        } catch (_: Throwable) {}
+        try {
+            secondaryCameraSource.release()
+        } catch (_: Throwable) {}
     }
 
     companion object {
