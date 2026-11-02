@@ -36,6 +36,7 @@ import io.github.thibaultbee.streampack.core.elements.utils.extensions.rotate
 import io.github.thibaultbee.streampack.core.elements.utils.time.TimeUtils
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.elements.utils.time.VideoTimebaseConverter
+import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.logger.Logger
 import io.github.thibaultbee.streampack.core.pipelines.DispatcherProvider.Companion.THREAD_NAME_GL
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
@@ -416,6 +417,30 @@ private class DefaultSurfaceProcessor(
         }
     }
 
+    private val lastLoggedGeometry = hashMapOf<Int, String>()
+
+    // Logs only when the geometry of an input changes to avoid spamming every frame.
+    private fun logInputGeometry(
+        index: Int,
+        input: SurfaceInput,
+        infoProvider: ISourceInfoProvider,
+        relativeRotation: Int,
+        sourceWidth: Float,
+        sourceHeight: Float,
+        destWidth: Float,
+        destHeight: Float
+    ) {
+        val message = "input#$index bufferSize=${input.bufferSize} " +
+                "sensorRotation=${infoProvider.rotationDegrees} relativeRotation=$relativeRotation " +
+                "mirror=${infoProvider.isMirror} displaySource=${sourceWidth}x$sourceHeight " +
+                "(aspect=${sourceWidth / sourceHeight}) dest=${destWidth}x$destHeight " +
+                "(aspect=${destWidth / destHeight})"
+        if (lastLoggedGeometry[index] != message) {
+            lastLoggedGeometry[index] = message
+            Logger.i(TAG, "PiP geometry: $message")
+        }
+    }
+
     private fun applyAspectCrop(
         matrix: FloatArray,
         sourceWidth: Float,
@@ -493,6 +518,10 @@ private class DefaultSurfaceProcessor(
                     val sourceWidth = if (isRotated) sourceSize.height.toFloat() else sourceSize.width.toFloat()
                     val sourceHeight = if (isRotated) sourceSize.width.toFloat() else sourceSize.height.toFloat()
 
+                    logInputGeometry(
+                        index, input, infoProvider, rot, sourceWidth, sourceHeight,
+                        destWidth, destHeight
+                    )
                     applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight)
 
                     OpenGlRenderer.RenderInput(

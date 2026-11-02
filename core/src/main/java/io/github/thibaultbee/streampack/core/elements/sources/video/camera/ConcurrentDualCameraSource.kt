@@ -129,6 +129,23 @@ class ConcurrentDualCameraSource internal constructor(
         }
     }
 
+    // The camera may silently pick another stream size if the requested one is unsupported.
+    private fun logSupportedSize(name: String, cameraId: String, requested: Size) {
+        try {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+            val sizes = manager.getCameraCharacteristics(cameraId)
+                .get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?.getOutputSizes(android.graphics.SurfaceTexture::class.java)
+            Logger.i(
+                TAG,
+                "PiP $name camera $cameraId requested=$requested supported=${sizes?.contains(requested)} " +
+                        "sizes=${sizes?.joinToString { "${it.width}x${it.height}" }}"
+            )
+        } catch (t: Throwable) {
+            Logger.w(TAG, "Failed to query sizes for camera $cameraId: ${t.message}")
+        }
+    }
+
     override fun setSurfaceProcessor(processor: ISurfaceProcessorInternal) {
         this.surfaceProcessor = processor
         processor.compositionMode = compositionMode
@@ -200,6 +217,8 @@ class ConcurrentDualCameraSource internal constructor(
         if (processor != null) {
             val primaryRes = savedConfig?.resolution ?: Size(1920, 1080)
             val secondarySize = computeSecondaryResolution(primaryRes, compositionMode)
+            logSupportedSize("primary", primaryCameraSource.cameraId, primaryRes)
+            logSupportedSize("secondary", secondaryCameraSource.cameraId, secondarySize)
             val secSurface = processor.createInputSurface(secondarySize, secondaryCameraSource.timebase)
             this.secondarySurface = secSurface
             secondaryCameraSource.setOutput(secSurface)
