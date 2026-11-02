@@ -27,6 +27,7 @@ import com.google.common.util.concurrent.ListenableFuture
 import io.github.thibaultbee.streampack.core.elements.interfaces.ISnapshotable
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.ISurfaceOutput
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
+import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ConcurrentDualCameraSource
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.extensions.preRotate
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.extensions.preVerticalFlip
@@ -51,6 +52,7 @@ private class DefaultSurfaceProcessor(
 ) : ISurfaceProcessorInternal, SurfaceTexture.OnFrameAvailableListener, ISnapshotable {
     override var isMuted: Boolean = false
     override var compositionMode: CompositionMode = CompositionMode.PIP_TOP_RIGHT
+    var activeVideoSource: Any? = null
 
     private val renderer = OpenGlRenderer()
 
@@ -413,6 +415,35 @@ private class DefaultSurfaceProcessor(
         }
     }
 
+    private fun applyAspectCrop(
+        matrix: FloatArray,
+        sourceWidth: Float,
+        sourceHeight: Float,
+        destWidth: Float,
+        destHeight: Float
+    ) {
+        if (sourceWidth <= 0f || sourceHeight <= 0f || destWidth <= 0f || destHeight <= 0f) return
+
+        val sourceAspect = sourceWidth / sourceHeight
+        val destAspect = destWidth / destHeight
+
+        if (kotlin.math.abs(sourceAspect - destAspect) < 0.01f) return
+
+        val scaleX: Float
+        val scaleY: Float
+        if (sourceAspect > destAspect) {
+            scaleX = destAspect / sourceAspect
+            scaleY = 1.0f
+        } else {
+            scaleX = 1.0f
+            scaleY = sourceAspect / destAspect
+        }
+
+        android.opengl.Matrix.translateM(matrix, 0, 0.5f, 0.5f, 0f)
+        android.opengl.Matrix.scaleM(matrix, 0, scaleX, scaleY, 1.0f)
+        android.opengl.Matrix.translateM(matrix, 0, -0.5f, -0.5f, 0f)
+    }
+
     // Executed on GL thread continuously (CFR) or onFrameAvailable (Event-driven)
     private fun renderLatestFrame() {
         if (!hasFirstFrame || surfaceInputs.isEmpty()) return
@@ -425,22 +456,34 @@ private class DefaultSurfaceProcessor(
 
         val targetRects = compositionMode.getNormalizedRects(surfaceInputs.size)
 
-        val renderInputs = surfaceInputs.mapIndexed { index, input ->
-            val transform = surfaceInputsToMatrixMap[input.surfaceTexture] ?: FloatArray(16)
-            val rectNorm = targetRects.getOrElse(index) { RectF(0f, 0f, 1f, 1f) }
-            OpenGlRenderer.RenderInput(
-                textureId = input.textureId,
-                textureTransform = transform,
-                targetRectNorm = rectNorm
-            )
-        }
-
         surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach { output ->
             try {
-                val transformedInputs = renderInputs.map { input ->
+                val transformedInputs = surfaceInputs.mapIndexed { index, input ->
+                    val rawTransform = surfaceInputsToMatrixMap[input.surfaceTexture] ?: FloatArray(16)
+                    val rectNorm = targetRects.getOrElse(index) { RectF(0f, 0f, 1f, 1f) }
+
+                    val dualSource = activeVideoSource as? ConcurrentDualCameraSource
+                    val infoProvider = dualSource?.getInfoProvider(index) ?: output.sourceInfoProvider
+
                     val outputMatrix = FloatArray(16)
-                    output.updateTransformMatrix(outputMatrix, input.textureTransform)
-                    input.copy(textureTransform = outputMatrix)
+                    output.updateTransformMatrix(outputMatrix, rawTransform, infoProvider)
+
+                    val destWidth = rectNorm.width() * output.targetResolution.width
+                    val destHeight = rectNorm.height() * output.targetResolution.height
+
+                    val sourceSize = infoProvider.getSurfaceSize(output.targetResolution)
+                    val rot = infoProvider.getRelativeRotationDegrees(output.targetRotation, infoProvider.isMirror)
+                    val isRotated = (rot % 180) != 0
+                    val sourceWidth = if (isRotated) sourceSize.height.toFloat() else sourceSize.width.toFloat()
+                    val sourceHeight = if (isRotated) sourceSize.width.toFloat() else sourceSize.height.toFloat()
+
+                    applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight)
+
+                    OpenGlRenderer.RenderInput(
+                        textureId = input.textureId,
+                        textureTransform = outputMatrix,
+                        targetRectNorm = rectNorm
+                    )
                 }
 
                 if (output.isStreaming()) {

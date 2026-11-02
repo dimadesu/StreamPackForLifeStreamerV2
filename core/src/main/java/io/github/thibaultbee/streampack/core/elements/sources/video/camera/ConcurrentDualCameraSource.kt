@@ -74,6 +74,14 @@ class ConcurrentDualCameraSource internal constructor(
     override val infoProviderFlow
         get() = primaryCameraSource.infoProviderFlow
 
+    fun getInfoProvider(index: Int): io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider {
+        return if (index == 1) {
+            secondaryCameraSource.infoProviderFlow.value
+        } else {
+            primaryCameraSource.infoProviderFlow.value
+        }
+    }
+
     private var surfaceProcessor: ISurfaceProcessorInternal? = null
     private var primarySurface: Surface? = null
     private var secondarySurface: Surface? = null

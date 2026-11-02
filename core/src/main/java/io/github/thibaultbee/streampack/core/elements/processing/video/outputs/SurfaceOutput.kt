@@ -53,7 +53,7 @@ class SurfaceOutput(
     val isStreaming: () -> Boolean,
     sourceResolution: Size,
     val needMirroring: Boolean,
-    sourceInfoProvider: ISourceInfoProvider
+    val sourceInfoProvider: ISourceInfoProvider
 ) :
     ISurfaceOutput {
     override val type = ISurfaceOutput.OutputType.INTERNAL
@@ -110,9 +110,25 @@ class SurfaceOutput(
         )
     }
 
-    override fun updateTransformMatrix(output: FloatArray, input: FloatArray) {
+    override fun updateTransformMatrix(
+        output: FloatArray,
+        input: FloatArray,
+        overrideInfoProvider: ISourceInfoProvider?
+    ) {
+        val transform = if (overrideInfoProvider == null || overrideInfoProvider == sourceInfoProvider) {
+            additionalTransform
+        } else {
+            val customAddTransform = FloatArray(16)
+            val customInvertedTransform = FloatArray(16)
+            calculateAdditionalTransform(
+                customAddTransform,
+                customInvertedTransform,
+                overrideInfoProvider
+            )
+            customAddTransform
+        }
         Matrix.multiplyMM(
-            output, 0, input, 0, additionalTransform, 0
+            output, 0, input, 0, transform, 0
         )
     }
 
