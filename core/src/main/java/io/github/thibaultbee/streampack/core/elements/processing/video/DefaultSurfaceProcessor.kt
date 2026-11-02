@@ -149,11 +149,12 @@ private class DefaultSurfaceProcessor(
                 TimeUtils.systemTimeProvider
             )
             surfaceInputsToMatrixMap[surfaceTexture] = FloatArray(16)
-            SurfaceInput(Surface(surfaceTexture), surfaceTexture, textureId)
+            val surfaceInput = SurfaceInput(Surface(surfaceTexture), surfaceTexture, textureId)
+            surfaceInputs.add(surfaceInput)
+            surfaceInput
         }
 
         val surfaceInput = future.get()
-        surfaceInputs.add(surfaceInput)
 
         // Start CFR render loop when input is created, if enabled
         executeSafely {
