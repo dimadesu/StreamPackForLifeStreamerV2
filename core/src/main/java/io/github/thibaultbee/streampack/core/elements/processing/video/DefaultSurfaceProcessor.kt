@@ -538,6 +538,10 @@ private class DefaultSurfaceProcessor(
                     )
                     applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight)
 
+                    if (index == 0) {
+                        outputMatrix.copyInto(surfaceOutputMatrix)
+                    }
+
                     OpenGlRenderer.RenderInput(
                         textureId = input.textureId,
                         textureTransform = outputMatrix,
