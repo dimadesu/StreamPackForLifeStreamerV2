@@ -566,6 +566,10 @@ class PreviewView @JvmOverloads constructor(
         }
         viewfinderSurfaceRequest?.markSurfaceSafeToRelease()
         viewfinderSurfaceRequest = null
+        
+        lastRequestedSize = null
+        lastRequestedRotation = null
+        lastRequestedVideoSource = null
     }
 
 
