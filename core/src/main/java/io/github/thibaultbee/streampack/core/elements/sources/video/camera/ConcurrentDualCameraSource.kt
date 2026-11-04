@@ -192,10 +192,17 @@ class ConcurrentDualCameraSource internal constructor(
         val surface = previewSurface ?: return
         val size = previewSize ?: return
 
+        val rotation = context.displayRotation
+        if (previewOutput != null &&
+            previewOutput?.targetResolution == size &&
+            previewOutput?.targetRotation == rotation
+        ) {
+            return
+        }
+
         // The processor drops its outputs when the input resolution changes: always re-add.
         detachPreviewOutput()
         try {
-            val rotation = context.displayRotation
             val baseProvider = infoProviderFlow.value
             // The composited frame is already upright and sized as the preview: no letterboxing.
             val previewInfoProvider = object : ISourceInfoProvider by baseProvider {
@@ -288,7 +295,10 @@ class ConcurrentDualCameraSource internal constructor(
             (targetSize.width * scale).roundToInt().coerceAtLeast(2) and 1.inv(),
             (targetSize.height * scale).roundToInt().coerceAtLeast(2) and 1.inv()
         )
-        previewSize = size
+        if (previewSize != size) {
+            previewSize = size
+            attachPreviewOutput()
+        }
         return size
     }
 
