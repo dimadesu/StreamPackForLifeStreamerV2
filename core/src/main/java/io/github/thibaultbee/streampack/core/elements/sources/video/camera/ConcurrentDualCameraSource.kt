@@ -295,10 +295,8 @@ class ConcurrentDualCameraSource internal constructor(
             (targetSize.width * scale).roundToInt().coerceAtLeast(2) and 1.inv(),
             (targetSize.height * scale).roundToInt().coerceAtLeast(2) and 1.inv()
         )
-        if (previewSize != size) {
-            previewSize = size
-            attachPreviewOutput()
-        }
+        previewSize = size
+        attachPreviewOutput()
         return size
     }
 

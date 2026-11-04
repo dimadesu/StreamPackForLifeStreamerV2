@@ -299,6 +299,11 @@ class PreviewView @JvmOverloads constructor(
                     Logger.d(TAG, "Previous source stopped")
                 }
 
+                // Clear cache so new streamer forces a new preview request
+                lastRequestedSize = null
+                lastRequestedRotation = null
+                lastRequestedVideoSource = null
+
                 streamer = newStreamer
                 if (newStreamer != null) {
                     collectSource(newStreamer)
@@ -325,22 +330,11 @@ class PreviewView @JvmOverloads constructor(
         }
     }
 
-    // Tracks when onConfigurationChanged last triggered a preview restart,
-    // so onSizeChanged can skip its own restart if it fires shortly after.
-    private var lastConfigChangeRestartMs = 0L
-
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         Logger.d(TAG, "onSizeChanged")
 
         if (w != oldw || h != oldh) {
-            // If onConfigurationChanged already restarted the preview very recently
-            // (within 100ms), skip to avoid a redundant restart.
-            val now = android.os.SystemClock.elapsedRealtime()
-            if (now - lastConfigChangeRestartMs > 100) {
-                attachToStreamerIfReady(true)
-            } else {
-                Logger.d(TAG, "Skipping restart, onConfigurationChanged already handled it")
-            }
+            attachToStreamerIfReady(true)
         }
     }
 
@@ -353,9 +347,10 @@ class PreviewView @JvmOverloads constructor(
         // Android cameras handle display rotation internally via CameraViewfinder,
         // but for square resolutions, CameraViewfinder sometimes fails to update 
         // its matrix if onSizeChanged doesn't fire. Thus, we manually restart 
-        // for all sources. Our timestamp check in onSizeChanged prevents double-fires.
-        lastConfigChangeRestartMs = android.os.SystemClock.elapsedRealtime()
-        attachToStreamerIfReady(true)
+        // for all sources. The duplicate request check in startPreview prevents double-fires.
+        post {
+            attachToStreamerIfReady(true)
+        }
     }
 
     override fun onWindowVisibilityChanged(visibility: Int) {
@@ -469,6 +464,10 @@ class PreviewView @JvmOverloads constructor(
         }
     }
 
+    private var lastRequestedSize: Size? = null
+    private var lastRequestedRotation: Int? = null
+    private var lastRequestedVideoSource: IPreviewableSource? = null
+
     /**
      * Starts the preview for the given [size] and [videoSource].
      */
@@ -480,6 +479,15 @@ class PreviewView @JvmOverloads constructor(
             Logger.w(TAG, "Invalid size: $size")
             return
         }
+        val currentRotation = display.rotation
+        if (size == lastRequestedSize && currentRotation == lastRequestedRotation && videoSource == lastRequestedVideoSource) {
+            Logger.d(TAG, "Skipping duplicate preview request for $size at rotation $currentRotation")
+            return
+        }
+        lastRequestedSize = size
+        lastRequestedRotation = currentRotation
+        lastRequestedVideoSource = videoSource
+
         val previewSize = getPreviewSize(videoSource, size)
         Logger.i(TAG, "Starting preview with size ($previewSize) for ($size)")
         val builder = ViewfinderSurfaceRequest.Builder(previewSize)
