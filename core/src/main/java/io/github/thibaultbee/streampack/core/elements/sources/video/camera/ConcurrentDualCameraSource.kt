@@ -224,7 +224,8 @@ class ConcurrentDualCameraSource internal constructor(
                 targetRotation = rotation,
                 isStreaming = { true },
                 sourceResolution = size,
-                needMirroring = false,
+                // Front camera selfie view in the preview only; the stream is not mirrored.
+                needMirroring = true,
                 sourceInfoProvider = previewInfoProvider
             )
             processor.addOutputSurface(output)

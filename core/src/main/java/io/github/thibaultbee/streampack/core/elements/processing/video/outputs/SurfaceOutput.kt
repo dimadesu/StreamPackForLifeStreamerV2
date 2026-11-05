@@ -126,17 +126,18 @@ class SurfaceOutput(
                     overrideTransforms.clear()
                 }
                 FloatArray(16).also {
-                    // Each composited input follows its own source: it is mirrored when the
-                    // source is (e.g. front camera selfie view).
+                    // Same rule as single source outputs: mirroring only applies when this
+                    // output asks for it (e.g. preview), and then only to mirrored sources
+                    // such as the front camera. The stream is never mirrored.
                     calculateAdditionalTransform(
                         it,
                         FloatArray(16),
                         overrideInfoProvider,
                         overrideInfoProvider.getRelativeRotationDegrees(
                             targetRotation,
-                            overrideInfoProvider.isMirror
+                            needMirroring
                         ),
-                        overrideInfoProvider.isMirror
+                        needMirroring && overrideInfoProvider.isMirror
                     )
                 }
             }

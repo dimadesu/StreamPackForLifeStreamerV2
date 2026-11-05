@@ -529,6 +529,8 @@ private class DefaultSurfaceProcessor(
             surfaceInputs
         }
         val targetRects = compositionMode.getNormalizedRects(orderedInputs.size)
+        val hasUnmirroredOutput =
+            surfaceOutputs.any { it is SurfaceOutput && !it.needMirroring }
 
         surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach { output ->
             try {
@@ -565,7 +567,8 @@ private class DefaultSurfaceProcessor(
                     )
                     applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight)
 
-                    if (index == 0) {
+                    // Snapshots follow the stream (not mirrored), not the mirrored preview output.
+                    if (index == 0 && (!output.needMirroring || !hasUnmirroredOutput)) {
                         outputMatrix.copyInto(surfaceOutputMatrix)
                     }
 
