@@ -170,6 +170,11 @@ internal class VideoInput(
                 val previousVideoSource = sourceInternalFlow.value
                 val isStreaming = previousVideoSource?.isStreamingFlow?.value ?: false
 
+                if (videoSourceFactory.isSourceEquals(previousVideoSource)) {
+                    Logger.i(TAG, "Video source is already set, skipping")
+                    return@withContext
+                }
+
                 if (previousVideoSource != null) {
                     try {
                         previousVideoSource.stopStream()
