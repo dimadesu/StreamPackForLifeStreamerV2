@@ -187,9 +187,19 @@ internal class VideoInput(
                         previousVideoSource.isCameraBased && videoSourceFactory.isCameraBased &&
                         (previousVideoSource is ConcurrentDualCameraSource ||
                                 videoSourceFactory is ConcurrentDualCameraSourceFactory)
+                val isSingleCameraSwitch =
+                    previousVideoSource is CameraSource && videoSourceFactory is CameraSourceFactory
+                if (isCameraSwitch || isSingleCameraSwitch) {
+                    /**
+                     * Stopping the previous source would otherwise be seen as the input being
+                     * stopped and would stop the new source once the mutex is released.
+                     */
+                    isStreamingJob.cancel()
+                }
                 if (isCameraSwitch) {
                     releasePreviousCameraSource(previousVideoSource!!)
-                } else if (previousVideoSource is CameraSource && videoSourceFactory is CameraSourceFactory) {
+                } else if (isSingleCameraSwitch) {
+                    previousVideoSource as CameraSource
                     /**
                      * Upstream behaviour: it is not possible to have 2 camera sources at the same
                      * time because of camera2 API, so the current one is released ASAP.
