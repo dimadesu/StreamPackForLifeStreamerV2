@@ -179,14 +179,11 @@ internal class VideoInput(
 
                 /**
                  * Camera2 can't open the same camera twice, and a concurrent dual camera source
-                 * holds two cameras. When switching to or from a dual camera source, the previous
-                 * one must be fully released before the new one is created. Single to single
-                 * camera switches keep the upstream order.
+                 * holds two cameras. When both the previous and the new source are camera based,
+                 * the previous one must be fully released before the new one is created.
                  */
                 val isCameraSwitch = previousVideoSource != null &&
-                        previousVideoSource.isCameraBased && videoSourceFactory.isCameraBased &&
-                        (previousVideoSource is ConcurrentDualCameraSource ||
-                                videoSourceFactory is ConcurrentDualCameraSourceFactory)
+                        previousVideoSource.isCameraBased && videoSourceFactory.isCameraBased
                 if (isCameraSwitch) {
                     releasePreviousCameraSource(previousVideoSource!!)
                 }
