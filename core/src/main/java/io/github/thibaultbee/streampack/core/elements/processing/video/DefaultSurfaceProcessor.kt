@@ -132,10 +132,7 @@ private class DefaultSurfaceProcessor(
                 throw IllegalStateException("SurfaceProcessor is released")
             }
 
-            // Only a composited (dual source) frame needs one texture per input; otherwise an
-            // incoming input overlaps the outgoing one during a source switch and shares the
-            // primary texture, as upstream does.
-            val textureId = if (surfaceInputs.isEmpty() || inputResolver == null) {
+            val textureId = if (surfaceInputs.isEmpty()) {
                 renderer.textureName
             } else {
                 renderer.createTextureName()
