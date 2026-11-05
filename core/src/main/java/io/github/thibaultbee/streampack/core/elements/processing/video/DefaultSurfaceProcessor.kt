@@ -17,7 +17,6 @@
 package io.github.thibaultbee.streampack.core.elements.processing.video
 
 import android.graphics.Bitmap
-import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.util.Size
 import android.view.Surface
@@ -35,7 +34,6 @@ import io.github.thibaultbee.streampack.core.elements.utils.extensions.rotate
 import io.github.thibaultbee.streampack.core.elements.utils.time.TimeUtils
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.elements.utils.time.VideoTimebaseConverter
-import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.logger.Logger
 import io.github.thibaultbee.streampack.core.pipelines.DispatcherProvider.Companion.THREAD_NAME_GL
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
@@ -55,6 +53,7 @@ private class DefaultSurfaceProcessor(
     override var inputResolver: IInputResolver? = null
 
     private val renderer = OpenGlRenderer()
+    private val compositor = MultiInputCompositor(renderer)
 
     private val glHandler = glThread.handler
 
@@ -430,59 +429,6 @@ private class DefaultSurfaceProcessor(
         }
     }
 
-    private val lastLoggedGeometry = hashMapOf<Int, String>()
-
-    // Logs only when the geometry of an input changes to avoid spamming every frame.
-    private fun logInputGeometry(
-        index: Int,
-        input: SurfaceInput,
-        infoProvider: ISourceInfoProvider,
-        relativeRotation: Int,
-        sourceWidth: Float,
-        sourceHeight: Float,
-        destWidth: Float,
-        destHeight: Float
-    ) {
-        val message = "input#$index bufferSize=${input.bufferSize} " +
-                "sensorRotation=${infoProvider.rotationDegrees} relativeRotation=$relativeRotation " +
-                "mirror=${infoProvider.isMirror} displaySource=${sourceWidth}x$sourceHeight " +
-                "(aspect=${sourceWidth / sourceHeight}) dest=${destWidth}x$destHeight " +
-                "(aspect=${destWidth / destHeight})"
-        if (lastLoggedGeometry[index] != message) {
-            lastLoggedGeometry[index] = message
-            Logger.i(TAG, "PiP geometry: $message")
-        }
-    }
-
-    private fun applyAspectCrop(
-        matrix: FloatArray,
-        sourceWidth: Float,
-        sourceHeight: Float,
-        destWidth: Float,
-        destHeight: Float
-    ) {
-        if (sourceWidth <= 0f || sourceHeight <= 0f || destWidth <= 0f || destHeight <= 0f) return
-
-        val sourceAspect = sourceWidth / sourceHeight
-        val destAspect = destWidth / destHeight
-
-        if (kotlin.math.abs(sourceAspect - destAspect) < 0.001f) return
-
-        val scaleX: Float
-        val scaleY: Float
-        if (sourceAspect > destAspect) {
-            scaleX = destAspect / sourceAspect
-            scaleY = 1.0f
-        } else {
-            scaleX = 1.0f
-            scaleY = sourceAspect / destAspect
-        }
-
-        android.opengl.Matrix.translateM(matrix, 0, 0.5f, 0.5f, 0f)
-        android.opengl.Matrix.scaleM(matrix, 0, scaleX, scaleY, 1.0f)
-        android.opengl.Matrix.translateM(matrix, 0, -0.5f, -0.5f, 0f)
-    }
-
     // Executed on GL thread continuously (CFR) or onFrameAvailable (Event-driven)
     private fun renderLatestFrame() {
         if (!hasFirstFrame || surfaceInputs.isEmpty()) return
@@ -496,7 +442,16 @@ private class DefaultSurfaceProcessor(
         if (inputResolver == null && surfaceInputs.size == 1) {
             renderSingleInput(renderTimestampNs)
         } else {
-            renderComposited(renderTimestampNs)
+            compositor.render(
+                renderTimestampNs,
+                surfaceInputs,
+                surfaceInputsToMatrixMap,
+                surfaceOutputs.filterIsInstance<SurfaceOutput>(),
+                inputResolver,
+                compositionMode,
+                isMuted,
+                surfaceOutputMatrix
+            )
         }
     }
 
@@ -510,80 +465,6 @@ private class DefaultSurfaceProcessor(
                         renderTimestampNs,
                         surfaceOutputMatrix,
                         it.targetSurface,
-                        isMuted
-                    )
-                }
-            } catch (t: Throwable) {
-                Logger.e(TAG, "Error while rendering frame", t)
-            }
-        }
-    }
-
-    // Draws several inputs (e.g. PiP) on each output.
-    private fun renderComposited(renderTimestampNs: Long) {
-        val resolver = inputResolver
-        // Rects are ordered primary first, secondary (drawn on top) last.
-        val orderedInputs = if (resolver != null) {
-            surfaceInputs.sortedBy { if (resolver.isSecondaryInput(it.surface)) 1 else 0 }
-        } else {
-            surfaceInputs
-        }
-        val targetRects = compositionMode.getNormalizedRects(orderedInputs.size)
-        val hasUnmirroredOutput =
-            surfaceOutputs.any { it is SurfaceOutput && !it.needMirroring }
-
-        surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach { output ->
-            try {
-                val transformedInputs = orderedInputs.mapIndexed { index, input ->
-                    val rawTransform = surfaceInputsToMatrixMap[input.surfaceTexture] ?: FloatArray(16)
-                    val rectNorm = targetRects.getOrElse(index) { RectF(0f, 0f, 1f, 1f) }
-
-                    // Match the provider and buffer size to the actual input surface: the input
-                    // order is not guaranteed to match the camera order after a camera switch.
-                    val infoProvider = resolver?.getInfoProvider(input.surface)
-                        ?: output.sourceInfoProvider
-
-                    val outputMatrix = FloatArray(16)
-                    output.updateTransformMatrix(outputMatrix, rawTransform, infoProvider)
-
-                    // Rects are relative to the output viewport, which may be letterboxed.
-                    val viewport = output.viewportRect
-                    val destWidth = rectNorm.width() * viewport.width()
-                    val destHeight = rectNorm.height() * viewport.height()
-
-                    val sourceSize = if (resolver != null) {
-                        input.bufferSize
-                    } else {
-                        infoProvider.getSurfaceSize(output.targetResolution)
-                    }
-                    val rot = infoProvider.getRelativeRotationDegrees(output.targetRotation, infoProvider.isMirror)
-                    val isRotated = (rot % 180) != 0
-                    val sourceWidth = if (isRotated) sourceSize.height.toFloat() else sourceSize.width.toFloat()
-                    val sourceHeight = if (isRotated) sourceSize.width.toFloat() else sourceSize.height.toFloat()
-
-                    logInputGeometry(
-                        index, input, infoProvider, rot, sourceWidth, sourceHeight,
-                        destWidth, destHeight
-                    )
-                    applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight)
-
-                    // Snapshots follow the stream (not mirrored), not the mirrored preview output.
-                    if (index == 0 && (!output.needMirroring || !hasUnmirroredOutput)) {
-                        outputMatrix.copyInto(surfaceOutputMatrix)
-                    }
-
-                    OpenGlRenderer.RenderInput(
-                        textureId = input.textureId,
-                        textureTransform = outputMatrix,
-                        targetRectNorm = rectNorm
-                    )
-                }
-
-                if (output.isStreaming()) {
-                    renderer.renderInputs(
-                        renderTimestampNs,
-                        transformedInputs,
-                        output.targetSurface,
                         isMuted
                     )
                 }
@@ -688,13 +569,6 @@ private class DefaultSurfaceProcessor(
     companion object {
         private const val TAG = "SurfaceProcessor"
     }
-
-    private data class SurfaceInput(
-        val surface: Surface,
-        val surfaceTexture: SurfaceTexture,
-        val textureId: Int,
-        val bufferSize: Size
-    )
 
     private data class PendingSnapshot(
         @IntRange(from = 0, to = 359)
