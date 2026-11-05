@@ -305,8 +305,8 @@ class ConcurrentDualCameraSource internal constructor(
             (targetSize.width * scale).roundToInt().coerceAtLeast(2) and 1.inv(),
             (targetSize.height * scale).roundToInt().coerceAtLeast(2) and 1.inv()
         )
+        // Only remembered: the output is attached by setPreview, once the new surface exists.
         previewSize = size
-        attachPreviewOutput()
         return size
     }
 
