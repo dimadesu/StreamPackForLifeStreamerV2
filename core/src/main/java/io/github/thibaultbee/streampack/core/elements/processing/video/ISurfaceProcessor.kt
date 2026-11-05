@@ -22,6 +22,7 @@ import androidx.annotation.IntRange
 import com.google.common.util.concurrent.ListenableFuture
 import io.github.thibaultbee.streampack.core.elements.interfaces.Releasable
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.ISurfaceOutput
+import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRangeProfile
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
@@ -49,10 +50,10 @@ interface ISurfaceProcessor {
  */
 interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
     /**
-     * The video source currently feeding the processor. Lets the processor query per-input
-     * information (e.g. each camera of a concurrent dual camera source).
+     * Optional resolver giving per-input information when several sources feed the processor
+     * (e.g. each camera of a concurrent dual camera source). `null` keeps the single input behavior.
      */
-    var activeVideoSource: Any?
+    var inputResolver: IInputResolver?
 
     fun createInputSurface(surfaceSize: Size, timebase: Timebase): Surface
 
@@ -77,4 +78,19 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
             dispatcherProvider: IVideoDispatcherProvider
         ): ISurfaceProcessorInternal
     }
+}
+
+/**
+ * Gives the processor per-input information when it composites several inputs.
+ */
+interface IInputResolver {
+    /**
+     * Whether [inputSurface] is a secondary input, drawn on top of the primary one.
+     */
+    fun isSecondaryInput(inputSurface: Surface): Boolean
+
+    /**
+     * The info provider of the source feeding [inputSurface].
+     */
+    fun getInfoProvider(inputSurface: Surface): ISourceInfoProvider
 }

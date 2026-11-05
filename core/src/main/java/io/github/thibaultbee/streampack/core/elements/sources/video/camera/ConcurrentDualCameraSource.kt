@@ -22,6 +22,7 @@ import android.util.Size
 import android.view.Surface
 import androidx.annotation.RequiresPermission
 import io.github.thibaultbee.streampack.core.elements.processing.video.CompositionMode
+import io.github.thibaultbee.streampack.core.elements.processing.video.IInputResolver
 import io.github.thibaultbee.streampack.core.elements.processing.video.ISurfaceProcessorInternal
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
 import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
@@ -53,7 +54,7 @@ class ConcurrentDualCameraSource internal constructor(
     internal val primaryCameraSource: CameraSource,
     internal val secondaryCameraSource: CameraSource,
     var compositionMode: CompositionMode = CompositionMode.PIP_TOP_RIGHT
-) : ICameraSource, ICameraSourceInternal, ISurfaceSourceInternal, ISurfaceProcessorAwareSource, AbstractPreviewableSource() {
+) : ICameraSource, ICameraSourceInternal, ISurfaceSourceInternal, ISurfaceProcessorAwareSource, IInputResolver, AbstractPreviewableSource() {
 
     override val cameraId: String
         get() = primaryCameraSource.cameraId
@@ -79,7 +80,7 @@ class ConcurrentDualCameraSource internal constructor(
     /**
      * Returns the info provider of the camera feeding [inputSurface].
      */
-    fun getInfoProvider(inputSurface: Surface): ISourceInfoProvider {
+    override fun getInfoProvider(inputSurface: Surface): ISourceInfoProvider {
         return if (isSecondaryInput(inputSurface)) {
             secondaryCameraSource.infoProviderFlow.value
         } else {
@@ -90,7 +91,7 @@ class ConcurrentDualCameraSource internal constructor(
     /**
      * Whether [inputSurface] is the processor input fed by the secondary (PiP) camera.
      */
-    fun isSecondaryInput(inputSurface: Surface) = inputSurface == secondarySurface
+    override fun isSecondaryInput(inputSurface: Surface) = inputSurface == secondarySurface
 
     private var surfaceProcessor: ISurfaceProcessorInternal? = null
     private var primarySurface: Surface? = null
@@ -178,7 +179,7 @@ class ConcurrentDualCameraSource internal constructor(
     override fun setSurfaceProcessor(processor: ISurfaceProcessorInternal) {
         this.surfaceProcessor = processor
         processor.compositionMode = compositionMode
-        processor.activeVideoSource = this
+        processor.inputResolver = this
         attachPreviewOutput()
     }
 
@@ -252,7 +253,7 @@ class ConcurrentDualCameraSource internal constructor(
 
         val processor = surfaceProcessor
         if (processor != null) {
-            processor.activeVideoSource = this
+            processor.inputResolver = this
             val primaryRes = savedConfig?.resolution ?: Size(1920, 1080)
             val secondarySize = computeSecondaryResolution(primaryRes, compositionMode)
             logSupportedSize("primary", primaryCameraSource.cameraId, primaryRes)
@@ -282,7 +283,7 @@ class ConcurrentDualCameraSource internal constructor(
     // The processor outlives this source: it must not keep pointing at a released dual source.
     private fun clearProcessorReference() {
         surfaceProcessor?.let {
-            if (it.activeVideoSource === this) it.activeVideoSource = null
+            if (it.inputResolver === this) it.inputResolver = null
         }
     }
 

@@ -27,7 +27,6 @@ import com.google.common.util.concurrent.ListenableFuture
 import io.github.thibaultbee.streampack.core.elements.interfaces.ISnapshotable
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.ISurfaceOutput
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
-import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ConcurrentDualCameraSource
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.extensions.preRotate
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.extensions.preVerticalFlip
@@ -53,7 +52,7 @@ private class DefaultSurfaceProcessor(
 ) : ISurfaceProcessorInternal, SurfaceTexture.OnFrameAvailableListener, ISnapshotable {
     override var isMuted: Boolean = false
     override var compositionMode: CompositionMode = CompositionMode.PIP_TOP_RIGHT
-    override var activeVideoSource: Any? = null
+    override var inputResolver: IInputResolver? = null
 
     private val renderer = OpenGlRenderer()
 
@@ -370,10 +369,10 @@ private class DefaultSurfaceProcessor(
 
     private fun isPrimaryInput(surfaceTexture: SurfaceTexture): Boolean {
         if (surfaceInputs.size <= 1) return true
-        val dualSource = activeVideoSource as? ConcurrentDualCameraSource
-        return if (dualSource != null) {
+        val resolver = inputResolver
+        return if (resolver != null) {
             val input = surfaceInputs.find { it.surfaceTexture == surfaceTexture }
-            input != null && !dualSource.isSecondaryInput(input.surface)
+            input != null && !resolver.isSecondaryInput(input.surface)
         } else {
             surfaceInputs.firstOrNull()?.surfaceTexture == surfaceTexture
         }
@@ -494,10 +493,10 @@ private class DefaultSurfaceProcessor(
             latestTimestampNs
         }
 
-        val dualSource = activeVideoSource as? ConcurrentDualCameraSource
+        val resolver = inputResolver
         // Rects are ordered primary first, secondary (drawn on top) last.
-        val orderedInputs = if (dualSource != null) {
-            surfaceInputs.sortedBy { if (dualSource.isSecondaryInput(it.surface)) 1 else 0 }
+        val orderedInputs = if (resolver != null) {
+            surfaceInputs.sortedBy { if (resolver.isSecondaryInput(it.surface)) 1 else 0 }
         } else {
             surfaceInputs
         }
@@ -511,7 +510,7 @@ private class DefaultSurfaceProcessor(
 
                     // Match the provider and buffer size to the actual input surface: the input
                     // order is not guaranteed to match the camera order after a camera switch.
-                    val infoProvider = dualSource?.getInfoProvider(input.surface)
+                    val infoProvider = resolver?.getInfoProvider(input.surface)
                         ?: output.sourceInfoProvider
 
                     val outputMatrix = FloatArray(16)
@@ -522,7 +521,7 @@ private class DefaultSurfaceProcessor(
                     val destWidth = rectNorm.width() * viewport.width()
                     val destHeight = rectNorm.height() * viewport.height()
 
-                    val sourceSize = if (dualSource != null) {
+                    val sourceSize = if (resolver != null) {
                         input.bufferSize
                     } else {
                         infoProvider.getSurfaceSize(output.targetResolution)
