@@ -32,6 +32,8 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.VideoSourceConfig
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraSourceFactory
+import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ConcurrentDualCameraSource
+import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ConcurrentDualCameraSourceFactory
 import io.github.thibaultbee.streampack.core.elements.utils.ConflatedJob
 import io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRangeProfile
 import io.github.thibaultbee.streampack.core.logger.Logger
@@ -175,28 +177,15 @@ internal class VideoInput(
                     return@withContext
                 }
 
-                if (previousVideoSource != null) {
-                    try {
-                        previousVideoSource.stopStream()
-                    } catch (_: Throwable) {}
-
-                    if (previousVideoSource is ISurfaceSourceInternal) {
-                        try {
-                            val surface = previousVideoSource.getOutput()
-                            previousVideoSource.resetOutput()
-                            surface?.let { processor.removeInputSurface(it) }
-                        } catch (t: Throwable) {
-                            Logger.w(TAG, "setVideoSource: Can't reset previous video source output: ${t.message}")
-                        }
-                    }
-
-                    try {
-                        previousVideoSource.release()
-                    } catch (t: Throwable) {
-                        Logger.w(TAG, "setVideoSource: Can't release previous video source: ${t.message}")
-                    }
-
-                    delay(200)
+                /**
+                 * Camera2 can't open the same camera twice, and a concurrent dual camera source
+                 * holds two cameras. When both the previous and the new source are camera based,
+                 * the previous one must be fully released before the new one is created.
+                 */
+                val isCameraSwitch = previousVideoSource != null &&
+                        previousVideoSource.isCameraBased && videoSourceFactory.isCameraBased
+                if (isCameraSwitch) {
+                    releasePreviousCameraSource(previousVideoSource!!)
                 }
 
                 // Prepare new video source
@@ -232,6 +221,17 @@ internal class VideoInput(
                 // Start new video source
                 if (isStreaming) {
                     Logger.e(TAG, "Starting new video source streaming")
+                    if (!isCameraSwitch) {
+                        try {
+                            previousVideoSource?.stopStream()
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Can't stop previous video source: ${t.message}"
+                            )
+                        }
+                    }
+
                     updateOutputSurfacesUnsafe(newVideoSource.infoProviderFlow.value)
 
                     try {
@@ -260,11 +260,78 @@ internal class VideoInput(
                     }
                 }
 
+                if (!isCameraSwitch) {
+                    // Gets and resets output surface from previous video source.
+                    if (previousVideoSource is ISurfaceSourceInternal) {
+                        try {
+                            val surface = previousVideoSource.getOutput()
+                            previousVideoSource.resetOutput()
+                            surface?.let { processor.removeInputSurface(surface) }
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Can't reset previous video source output surface: ${t.message}"
+                            )
+                        }
+                    }
+
+                    val isPreviewing =
+                        (previousVideoSource as? IPreviewableSource)?.isPreviewingFlow?.value
+                            ?: false
+                    /**
+                     * Release previous video source only if it's not previewing.
+                     * If it's previewing, it will be released when preview is stopped.
+                     */
+                    if (!isPreviewing) {
+                        try {
+                            previousVideoSource?.release()
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Can't release previous video source: ${t.message}"
+                            )
+                        }
+                    }
+                }
+
                 // Replace video source
                 sourceInternalFlow.emit(newVideoSource)
             }
         }
     }
+
+    private suspend fun releasePreviousCameraSource(previousVideoSource: IVideoSourceInternal) {
+        try {
+            previousVideoSource.stopStream()
+        } catch (t: Throwable) {
+            Logger.w(TAG, "setVideoSource: Can't stop previous camera source: ${t.message}")
+        }
+
+        if (previousVideoSource is ISurfaceSourceInternal) {
+            try {
+                val surface = previousVideoSource.getOutput()
+                previousVideoSource.resetOutput()
+                surface?.let { processor.removeInputSurface(it) }
+            } catch (t: Throwable) {
+                Logger.w(TAG, "setVideoSource: Can't reset previous camera source output: ${t.message}")
+            }
+        }
+
+        try {
+            previousVideoSource.release()
+        } catch (t: Throwable) {
+            Logger.w(TAG, "setVideoSource: Can't release previous camera source: ${t.message}")
+        }
+
+        // Gives the camera HAL time to actually free the device(s).
+        delay(CAMERA_RELEASE_DELAY_MS)
+    }
+
+    private val IVideoSourceInternal.isCameraBased: Boolean
+        get() = this is CameraSource || this is ConcurrentDualCameraSource
+
+    private val IVideoSourceInternal.Factory.isCameraBased: Boolean
+        get() = this is CameraSourceFactory || this is ConcurrentDualCameraSourceFactory
 
 
     suspend fun setSourceConfig(newVideoSourceConfig: VideoSourceConfig) {
@@ -663,5 +730,6 @@ internal class VideoInput(
 
     companion object {
         private const val TAG = "VideoInput"
+        private const val CAMERA_RELEASE_DELAY_MS = 200L
     }
 }
