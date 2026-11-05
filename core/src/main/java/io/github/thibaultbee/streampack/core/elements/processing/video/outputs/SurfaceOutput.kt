@@ -53,7 +53,7 @@ class SurfaceOutput(
     val isStreaming: () -> Boolean,
     sourceResolution: Size,
     val needMirroring: Boolean,
-    val sourceInfoProvider: ISourceInfoProvider
+    sourceInfoProvider: ISourceInfoProvider
 ) :
     ISurfaceOutput {
     override val type = ISurfaceOutput.OutputType.INTERNAL
@@ -110,36 +110,38 @@ class SurfaceOutput(
         )
     }
 
+    override fun updateTransformMatrix(output: FloatArray, input: FloatArray) {
+        Matrix.multiplyMM(
+            output, 0, input, 0, additionalTransform, 0
+        )
+    }
+
     // Per-input transforms for composited rendering, keyed by the input's info provider.
     private val overrideTransforms = hashMapOf<ISourceInfoProvider, FloatArray>()
 
-    override fun updateTransformMatrix(
+    fun updateTransformMatrix(
         output: FloatArray,
         input: FloatArray,
-        overrideInfoProvider: ISourceInfoProvider?
+        overrideInfoProvider: ISourceInfoProvider
     ) {
-        val transform = if (overrideInfoProvider == null) {
-            additionalTransform
-        } else {
-            overrideTransforms.getOrPut(overrideInfoProvider) {
-                if (overrideTransforms.size >= MAX_OVERRIDE_TRANSFORMS) {
-                    overrideTransforms.clear()
-                }
-                FloatArray(16).also {
-                    // Same rule as single source outputs: mirroring only applies when this
-                    // output asks for it (e.g. preview), and then only to mirrored sources
-                    // such as the front camera. The stream is never mirrored.
-                    calculateAdditionalTransform(
-                        it,
-                        FloatArray(16),
-                        overrideInfoProvider,
-                        overrideInfoProvider.getRelativeRotationDegrees(
-                            targetRotation,
-                            needMirroring
-                        ),
-                        needMirroring && overrideInfoProvider.isMirror
-                    )
-                }
+        val transform = overrideTransforms.getOrPut(overrideInfoProvider) {
+            if (overrideTransforms.size >= MAX_OVERRIDE_TRANSFORMS) {
+                overrideTransforms.clear()
+            }
+            FloatArray(16).also {
+                // Same rule as single source outputs: mirroring only applies when this
+                // output asks for it (e.g. preview), and then only to mirrored sources
+                // such as the front camera. The stream is never mirrored.
+                calculateAdditionalTransform(
+                    it,
+                    FloatArray(16),
+                    overrideInfoProvider,
+                    overrideInfoProvider.getRelativeRotationDegrees(
+                        targetRotation,
+                        needMirroring
+                    ),
+                    needMirroring && overrideInfoProvider.isMirror
+                )
             }
         }
         Matrix.multiplyMM(

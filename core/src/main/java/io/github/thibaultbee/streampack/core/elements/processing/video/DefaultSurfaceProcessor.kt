@@ -49,7 +49,6 @@ private class DefaultSurfaceProcessor(
     private val cfrFps: Int = 0
 ) : ISurfaceProcessorInternal, SurfaceTexture.OnFrameAvailableListener, ISnapshotable {
     override var isMuted: Boolean = false
-    override var compositionMode: CompositionMode = CompositionMode.PIP_TOP_RIGHT
     override var inputResolver: IInputResolver? = null
 
     private val renderer = OpenGlRenderer()
@@ -119,7 +118,11 @@ private class DefaultSurfaceProcessor(
         }
     }
 
-    override fun createInputSurface(surfaceSize: Size, timebase: Timebase): Surface {
+    override fun createInputSurface(
+        surfaceSize: Size,
+        timebase: Timebase,
+        isSecondary: Boolean
+    ): Surface {
         if (isReleaseRequested.get()) {
             throw IllegalStateException("SurfaceProcessor is released")
         }
@@ -132,10 +135,10 @@ private class DefaultSurfaceProcessor(
                 throw IllegalStateException("SurfaceProcessor is released")
             }
 
-            val textureId = if (surfaceInputs.isEmpty()) {
-                renderer.textureName
-            } else {
+            val textureId = if (isSecondary) {
                 renderer.createTextureName()
+            } else {
+                renderer.textureName
             }
 
             val surfaceTexture = SurfaceTexture(textureId)
@@ -367,14 +370,9 @@ private class DefaultSurfaceProcessor(
     }
 
     private fun isPrimaryInput(surfaceTexture: SurfaceTexture): Boolean {
-        if (surfaceInputs.size <= 1) return true
-        val resolver = inputResolver
-        return if (resolver != null) {
-            val input = surfaceInputs.find { it.surfaceTexture == surfaceTexture }
-            input != null && !resolver.isSecondaryInput(input.surface)
-        } else {
-            surfaceInputs.firstOrNull()?.surfaceTexture == surfaceTexture
-        }
+        val resolver = inputResolver ?: return true
+        val input = surfaceInputs.find { it.surfaceTexture == surfaceTexture } ?: return false
+        return !resolver.isSecondaryInput(input.surface)
     }
 
     // Executed on GL thread
@@ -439,7 +437,8 @@ private class DefaultSurfaceProcessor(
             latestTimestampNs
         }
 
-        if (inputResolver == null) {
+        val resolver = inputResolver
+        if (resolver == null) {
             renderSingleInput(renderTimestampNs)
         } else {
             compositor.render(
@@ -447,8 +446,7 @@ private class DefaultSurfaceProcessor(
                 surfaceInputs,
                 surfaceInputsToMatrixMap,
                 surfaceOutputs.filterIsInstance<SurfaceOutput>(),
-                inputResolver,
-                compositionMode,
+                resolver,
                 isMuted,
                 surfaceOutputMatrix
             )

@@ -16,6 +16,7 @@
 package io.github.thibaultbee.streampack.core.elements.processing.video
 
 import android.graphics.Bitmap
+import android.graphics.RectF
 import android.util.Size
 import android.view.Surface
 import androidx.annotation.IntRange
@@ -33,11 +34,6 @@ interface ISurfaceProcessor {
      * The video stream will be replaced by a black screen.
      */
     var isMuted: Boolean
-
-    /**
-     * The composition layout mode for multi-input rendering.
-     */
-    var compositionMode: CompositionMode
 }
 
 /**
@@ -55,7 +51,11 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
      */
     var inputResolver: IInputResolver?
 
-    fun createInputSurface(surfaceSize: Size, timebase: Timebase): Surface
+    fun createInputSurface(
+        surfaceSize: Size,
+        timebase: Timebase,
+        isSecondary: Boolean = false
+    ): Surface
 
     fun removeInputSurface(surface: Surface)
 
@@ -93,4 +93,10 @@ interface IInputResolver {
      * The info provider of the source feeding [inputSurface].
      */
     fun getInfoProvider(inputSurface: Surface): ISourceInfoProvider
+
+    /**
+     * Normalized target rectangle `[0..1]` for [inputSurface], or `null` if [inputSurface]
+     * does not belong to this resolver.
+     */
+    fun getTargetRect(inputSurface: Surface): RectF?
 }

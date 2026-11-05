@@ -6,7 +6,6 @@ import android.opengl.Matrix
 import android.util.Size
 import android.view.Surface
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
-import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.logger.Logger
 import kotlin.math.abs
 
@@ -27,30 +26,6 @@ internal data class SurfaceInput(
  * Must be used on the GL thread.
  */
 internal class MultiInputCompositor(private val renderer: OpenGlRenderer) {
-    private val lastLoggedGeometry = hashMapOf<Int, String>()
-
-    // Logs only when the geometry of an input changes to avoid spamming every frame.
-    private fun logInputGeometry(
-        index: Int,
-        input: SurfaceInput,
-        infoProvider: ISourceInfoProvider,
-        relativeRotation: Int,
-        sourceWidth: Float,
-        sourceHeight: Float,
-        destWidth: Float,
-        destHeight: Float
-    ) {
-        val message = "input#$index bufferSize=${input.bufferSize} " +
-                "sensorRotation=${infoProvider.rotationDegrees} relativeRotation=$relativeRotation " +
-                "mirror=${infoProvider.isMirror} displaySource=${sourceWidth}x$sourceHeight " +
-                "(aspect=${sourceWidth / sourceHeight}) dest=${destWidth}x$destHeight " +
-                "(aspect=${destWidth / destHeight})"
-        if (lastLoggedGeometry[index] != message) {
-            lastLoggedGeometry[index] = message
-            Logger.i(TAG, "PiP geometry: $message")
-        }
-    }
-
     private fun applyAspectCrop(
         matrix: FloatArray,
         sourceWidth: Float,
@@ -88,31 +63,24 @@ internal class MultiInputCompositor(private val renderer: OpenGlRenderer) {
         surfaceInputs: List<SurfaceInput>,
         surfaceInputsToMatrixMap: Map<SurfaceTexture, FloatArray>,
         outputs: List<SurfaceOutput>,
-        resolver: IInputResolver?,
-        compositionMode: CompositionMode,
+        resolver: IInputResolver,
         isMuted: Boolean,
         surfaceOutputMatrix: FloatArray
     ) {
-        // Rects are ordered primary first, secondary (drawn on top) last.
-        val orderedInputs = if (resolver != null) {
-            surfaceInputs.sortedBy { if (resolver.isSecondaryInput(it.surface)) 1 else 0 }
-        } else {
-            surfaceInputs
-        }
-        val targetRects = compositionMode.getNormalizedRects(orderedInputs.size)
-        val hasUnmirroredOutput =
-            outputs.any { !it.needMirroring }
+        // Primary first, secondary (drawn on top) last; ignore inputs not owned by the resolver.
+        val orderedInputs = surfaceInputs
+            .filter { resolver.getTargetRect(it.surface) != null }
+            .sortedBy { if (resolver.isSecondaryInput(it.surface)) 1 else 0 }
+        if (orderedInputs.isEmpty()) return
+
+        val hasUnmirroredOutput = outputs.any { !it.needMirroring }
 
         outputs.forEach { output ->
             try {
                 val transformedInputs = orderedInputs.mapIndexed { index, input ->
                     val rawTransform = surfaceInputsToMatrixMap[input.surfaceTexture] ?: FloatArray(16)
-                    val rectNorm = targetRects.getOrElse(index) { RectF(0f, 0f, 1f, 1f) }
-
-                    // Match the provider and buffer size to the actual input surface: the input
-                    // order is not guaranteed to match the camera order after a camera switch.
-                    val infoProvider = resolver?.getInfoProvider(input.surface)
-                        ?: output.sourceInfoProvider
+                    val rectNorm = resolver.getTargetRect(input.surface) ?: RectF(0f, 0f, 1f, 1f)
+                    val infoProvider = resolver.getInfoProvider(input.surface)
 
                     val outputMatrix = FloatArray(16)
                     output.updateTransformMatrix(outputMatrix, rawTransform, infoProvider)
@@ -122,20 +90,12 @@ internal class MultiInputCompositor(private val renderer: OpenGlRenderer) {
                     val destWidth = rectNorm.width() * viewport.width()
                     val destHeight = rectNorm.height() * viewport.height()
 
-                    val sourceSize = if (resolver != null) {
-                        input.bufferSize
-                    } else {
-                        infoProvider.getSurfaceSize(output.targetResolution)
-                    }
+                    val sourceSize = input.bufferSize
                     val rot = infoProvider.getRelativeRotationDegrees(output.targetRotation, infoProvider.isMirror)
                     val isRotated = (rot % 180) != 0
                     val sourceWidth = if (isRotated) sourceSize.height.toFloat() else sourceSize.width.toFloat()
                     val sourceHeight = if (isRotated) sourceSize.width.toFloat() else sourceSize.height.toFloat()
 
-                    logInputGeometry(
-                        index, input, infoProvider, rot, sourceWidth, sourceHeight,
-                        destWidth, destHeight
-                    )
                     applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight)
 
                     // Snapshots follow the stream (not mirrored), not the mirrored preview output.
