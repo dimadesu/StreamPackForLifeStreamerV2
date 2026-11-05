@@ -11,4 +11,9 @@ interface ISurfaceProcessorAwareSource {
      * Supplies the surface processor to the video source.
      */
     fun setSurfaceProcessor(processor: ISurfaceProcessorInternal)
+
+    /**
+     * Marker interface for factories creating an [ISurfaceProcessorAwareSource].
+     */
+    interface Factory : IVideoSourceInternal.Factory
 }
