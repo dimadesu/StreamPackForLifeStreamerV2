@@ -439,7 +439,7 @@ private class DefaultSurfaceProcessor(
             latestTimestampNs
         }
 
-        if (inputResolver == null && surfaceInputs.size == 1) {
+        if (inputResolver == null) {
             renderSingleInput(renderTimestampNs)
         } else {
             compositor.render(
@@ -455,7 +455,8 @@ private class DefaultSurfaceProcessor(
         }
     }
 
-    // Same path as upstream: no per-input crop nor viewport handling.
+    // Upstream path: draws the primary input only. Also used while a source switch briefly
+    // holds two inputs without a dual source, so the incoming input is never shown as PiP.
     private fun renderSingleInput(renderTimestampNs: Long) {
         surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach {
             try {
