@@ -174,6 +174,8 @@ internal class VideoInput(
                     return@withContext
                 }
 
+                isStreamingJob.cancel()
+
                 if (previousVideoSource != null && (
                         previousVideoSource is ISurfaceProcessorAwareSource ||
                         videoSourceFactory is ISurfaceProcessorAwareSource.Factory ||
