@@ -271,6 +271,85 @@ class OpenGlRenderer {
     }
 
     /**
+     * Renders the texture image to the output surface.
+     *
+     * @throws IllegalStateException if the renderer is not initialized, the caller doesn't run
+     * on the GL thread or the surface is not registered by
+     * [.registerOutputSurface].
+     */
+    fun render(
+        timestampNs: Long,
+        textureTransform: FloatArray,
+        surface: Surface,
+        isMuted: Boolean = false
+    ) {
+        checkInitializedOrThrow(mInitialized, true)
+        checkGlThreadOrThrow(mGlThread)
+
+        var outputSurface: OutputSurface? = getOutSurfaceOrThrow(surface)
+
+        // Workaround situations that out surface is failed to create or needs to be recreated.
+        if (outputSurface === NO_OUTPUT_SURFACE) {
+            outputSurface = createOutputSurfaceInternal(surface)
+            if (outputSurface == null) {
+                return
+            }
+
+            mOutputSurfaceMap[surface] = outputSurface
+        }
+
+        requireNotNull(outputSurface)
+
+        // Set output surface.
+        if (surface !== mCurrentSurface) {
+            makeCurrent(outputSurface.eglSurface)
+            mCurrentSurface = surface
+            GLES20.glViewport(
+                outputSurface.viewPortRect.left,
+                outputSurface.viewPortRect.top,
+                outputSurface.viewPortRect.width(),
+                outputSurface.viewPortRect.height()
+            )
+            GLES20.glScissor(
+                outputSurface.viewPortRect.left,
+                outputSurface.viewPortRect.top,
+                outputSurface.viewPortRect.width(),
+                outputSurface.viewPortRect.height()
+            )
+        }
+
+
+        if (isMuted) {
+            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        } else {
+            // TODO(b/245855601): Upload the matrix to GPU when textureTransform is changed.
+            val program: Program2D = requireNotNull(mCurrentProgram)
+            if (program is SamplerShaderProgram) {
+                // Copy the texture transformation matrix over.
+                program.updateTextureMatrix(textureTransform)
+            }
+
+            // Draw the rect.
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP,  /*firstVertex=*/0,  /*vertexCount=*/4)
+            checkGlErrorOrThrow("glDrawArrays")
+        }
+
+        // Set timestamp
+        EGLExt.eglPresentationTimeANDROID(mEglDisplay, outputSurface.eglSurface, timestampNs)
+
+        // Swap buffer
+        if (!EGL14.eglSwapBuffers(mEglDisplay, outputSurface.eglSurface)) {
+            Logger.w(
+                TAG, "Failed to swap buffers with EGL error: 0x" + Integer.toHexString(
+                    EGL14.eglGetError()
+                )
+            )
+            removeOutputSurfaceInternal(surface, false)
+        }
+    }
+
+    /**
      * Data class holding frame rendering configuration for an input stream.
      */
     data class RenderInput(
@@ -356,7 +435,15 @@ class OpenGlRenderer {
                 checkGlErrorOrThrow("glDrawArrays")
             }
 
+            // Leave the state expected by [render]: full viewport, no scissor, primary texture bound.
             GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+            GLES20.glViewport(
+                outputSurface.viewPortRect.left,
+                outputSurface.viewPortRect.top,
+                surfaceWidth,
+                surfaceHeight
+            )
+            useAndConfigureProgramWithTexture(mExternalTextureId)
         }
 
         // Set timestamp
@@ -371,23 +458,6 @@ class OpenGlRenderer {
             )
             removeOutputSurfaceInternal(surface, false)
         }
-    }
-
-    /**
-     * Renders the primary texture image to the output surface.
-     */
-    fun render(
-        timestampNs: Long,
-        textureTransform: FloatArray,
-        surface: Surface,
-        isMuted: Boolean = false
-    ) {
-        renderInputs(
-            timestampNs,
-            listOf(RenderInput(mExternalTextureId, textureTransform)),
-            surface,
-            isMuted
-        )
     }
 
     /**
