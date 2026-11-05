@@ -119,6 +119,14 @@ class ConcurrentDualCameraSource internal constructor(
     private var isPreviewRequested = false
     private var areCamerasActive = false
 
+    private val _secondaryCameraErrorFlow = MutableStateFlow<Throwable?>(null)
+
+    /**
+     * Last failure to start the secondary (PiP) camera, `null` when it started fine.
+     * When set, the source keeps streaming the primary camera only.
+     */
+    val secondaryCameraErrorFlow: StateFlow<Throwable?> = _secondaryCameraErrorFlow.asStateFlow()
+
     private fun computeSecondaryResolution(primaryResolution: Size, mode: CompositionMode): Size {
         val desired = when (mode) {
             CompositionMode.SIDE_BY_SIDE, CompositionMode.TOP_BOTTOM -> {
@@ -233,8 +241,10 @@ class ConcurrentDualCameraSource internal constructor(
             primaryCameraSource.startStream()
             try {
                 secondaryCameraSource.startStream()
+                _secondaryCameraErrorFlow.value = null
             } catch (t: Throwable) {
                 Logger.e(TAG, "Failed to start secondary camera stream in concurrent mode", t)
+                _secondaryCameraErrorFlow.value = t
             }
             areCamerasActive = true
         } else if (!isNeeded && areCamerasActive) {
