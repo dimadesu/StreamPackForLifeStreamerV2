@@ -218,7 +218,7 @@ internal class VideoInput(
                         } catch (t: Throwable) {
                             Logger.w(
                                 TAG,
-                                "setVideoSource: Can'update output surfaces after info provider changed: ${t.message}"
+                                "setVideoSource: Can't update output surfaces after info provider changed: ${t.message}"
                             )
                         }
                     }
