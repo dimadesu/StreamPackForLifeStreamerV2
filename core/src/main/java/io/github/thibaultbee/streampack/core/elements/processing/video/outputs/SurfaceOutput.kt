@@ -110,22 +110,36 @@ class SurfaceOutput(
         )
     }
 
+    // Per-input transforms for composited rendering, keyed by the input's info provider.
+    private val overrideTransforms = hashMapOf<ISourceInfoProvider, FloatArray>()
+
     override fun updateTransformMatrix(
         output: FloatArray,
         input: FloatArray,
         overrideInfoProvider: ISourceInfoProvider?
     ) {
-        val transform = if (overrideInfoProvider == null || overrideInfoProvider == sourceInfoProvider) {
+        val transform = if (overrideInfoProvider == null) {
             additionalTransform
         } else {
-            val customAddTransform = FloatArray(16)
-            val customInvertedTransform = FloatArray(16)
-            calculateAdditionalTransform(
-                customAddTransform,
-                customInvertedTransform,
-                overrideInfoProvider
-            )
-            customAddTransform
+            overrideTransforms.getOrPut(overrideInfoProvider) {
+                if (overrideTransforms.size >= MAX_OVERRIDE_TRANSFORMS) {
+                    overrideTransforms.clear()
+                }
+                FloatArray(16).also {
+                    // Each composited input follows its own source: it is mirrored when the
+                    // source is (e.g. front camera selfie view).
+                    calculateAdditionalTransform(
+                        it,
+                        FloatArray(16),
+                        overrideInfoProvider,
+                        overrideInfoProvider.getRelativeRotationDegrees(
+                            targetRotation,
+                            overrideInfoProvider.isMirror
+                        ),
+                        overrideInfoProvider.isMirror
+                    )
+                }
+            }
         }
         Matrix.multiplyMM(
             output, 0, input, 0, transform, 0
@@ -155,13 +169,10 @@ class SurfaceOutput(
     private fun calculateAdditionalTransform(
         additionalTransform: FloatArray,
         invertedTransform: FloatArray,
-        sourceInfoProvider: ISourceInfoProvider
+        sourceInfoProvider: ISourceInfoProvider,
+        relativeRotationDegrees: Int = rotationDegrees,
+        mirror: Boolean = needMirroring
     ) {
-        val currentRotationDegrees = sourceInfoProvider.getRelativeRotationDegrees(
-            targetRotation,
-            sourceInfoProvider.isMirror
-        )
-
         Matrix.setIdentityM(additionalTransform, 0)
 
         // Step 1, calculate the overall transformation(A * B) with the following steps:
@@ -174,10 +185,10 @@ class SurfaceOutput(
         additionalTransform.preVerticalFlip(0.5f)
 
         // Rotation
-        additionalTransform.preRotate(currentRotationDegrees.toFloat(), 0.5f, 0.5f)
+        additionalTransform.preRotate(relativeRotationDegrees.toFloat(), 0.5f, 0.5f)
 
         // Mirroring
-        if (sourceInfoProvider.isMirror) {
+        if (mirror) {
             Matrix.translateM(additionalTransform, 0, 1f, 0f, 0f)
             Matrix.scaleM(additionalTransform, 0, -1f, 1f, 1f)
         }
@@ -230,5 +241,9 @@ class SurfaceOutput(
 
         // Invert the matrix so it can be used to "undo" the SurfaceTexture#getTransformMatrix.
         Matrix.invertM(invertedTextureTransform, 0, invertedTextureTransform, 0)
+    }
+
+    private companion object {
+        const val MAX_OVERRIDE_TRANSFORMS = 4
     }
 }
