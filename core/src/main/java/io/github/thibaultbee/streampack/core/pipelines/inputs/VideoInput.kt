@@ -189,13 +189,6 @@ internal class VideoInput(
                                 videoSourceFactory is ConcurrentDualCameraSourceFactory)
                 if (isCameraSwitch) {
                     releasePreviousCameraSource(previousVideoSource!!)
-                } else if (previousVideoSource is CameraSource && videoSourceFactory is CameraSourceFactory) {
-                    /**
-                     * Upstream behaviour: it is not possible to have 2 camera sources at the same
-                     * time because of camera2 API, so the current one is released ASAP.
-                     */
-                    previousVideoSource.stopStream()
-                    previousVideoSource.release()
                 }
 
                 // Prepare new video source
