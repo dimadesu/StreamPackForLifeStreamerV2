@@ -252,6 +252,7 @@ class ConcurrentDualCameraSource internal constructor(
 
         val processor = surfaceProcessor
         if (processor != null) {
+            processor.activeVideoSource = this
             val primaryRes = savedConfig?.resolution ?: Size(1920, 1080)
             val secondarySize = computeSecondaryResolution(primaryRes, compositionMode)
             logSupportedSize("primary", primaryCameraSource.cameraId, primaryRes)
@@ -275,6 +276,14 @@ class ConcurrentDualCameraSource internal constructor(
             secondarySurface = null
         }
         primarySurface = null
+        clearProcessorReference()
+    }
+
+    // The processor outlives this source: it must not keep pointing at a released dual source.
+    private fun clearProcessorReference() {
+        surfaceProcessor?.let {
+            if (it.activeVideoSource === this) it.activeVideoSource = null
+        }
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
