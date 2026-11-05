@@ -185,7 +185,10 @@ internal class VideoInput(
                 val isCameraSwitch = previousVideoSource != null &&
                         previousVideoSource.isCameraBased && videoSourceFactory.isCameraBased
                 if (isCameraSwitch) {
-                    releasePreviousCameraSource(previousVideoSource!!)
+                    releasePreviousCameraSource(
+                        previousVideoSource!!,
+                        videoSourceFactory is ConcurrentDualCameraSourceFactory
+                    )
                 }
 
                 // Prepare new video source
@@ -300,7 +303,10 @@ internal class VideoInput(
         }
     }
 
-    private suspend fun releasePreviousCameraSource(previousVideoSource: IVideoSourceInternal) {
+    private suspend fun releasePreviousCameraSource(
+        previousVideoSource: IVideoSourceInternal,
+        toDualCamera: Boolean
+    ) {
         try {
             previousVideoSource.stopStream()
         } catch (t: Throwable) {
@@ -323,8 +329,11 @@ internal class VideoInput(
             Logger.w(TAG, "setVideoSource: Can't release previous camera source: ${t.message}")
         }
 
-        // Gives the camera HAL time to actually free the device(s).
-        delay(CAMERA_RELEASE_DELAY_MS)
+        // Gives the camera HAL time to actually free the device(s). A single camera to single
+        // camera switch uses 2 different cameras so it doesn't need to wait.
+        if (previousVideoSource is ConcurrentDualCameraSource || toDualCamera) {
+            delay(CAMERA_RELEASE_DELAY_MS)
+        }
     }
 
     private val IVideoSourceInternal.isCameraBased: Boolean
