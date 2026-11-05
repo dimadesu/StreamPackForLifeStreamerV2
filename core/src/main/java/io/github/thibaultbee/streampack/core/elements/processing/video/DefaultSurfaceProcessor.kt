@@ -493,6 +493,34 @@ private class DefaultSurfaceProcessor(
             latestTimestampNs
         }
 
+        if (inputResolver == null && surfaceInputs.size == 1) {
+            renderSingleInput(renderTimestampNs)
+        } else {
+            renderComposited(renderTimestampNs)
+        }
+    }
+
+    // Same path as upstream: no per-input crop nor viewport handling.
+    private fun renderSingleInput(renderTimestampNs: Long) {
+        surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach {
+            try {
+                it.updateTransformMatrix(surfaceOutputMatrix, textureMatrix)
+                if (it.isStreaming()) {
+                    renderer.render(
+                        renderTimestampNs,
+                        surfaceOutputMatrix,
+                        it.targetSurface,
+                        isMuted
+                    )
+                }
+            } catch (t: Throwable) {
+                Logger.e(TAG, "Error while rendering frame", t)
+            }
+        }
+    }
+
+    // Draws several inputs (e.g. PiP) on each output.
+    private fun renderComposited(renderTimestampNs: Long) {
         val resolver = inputResolver
         // Rects are ordered primary first, secondary (drawn on top) last.
         val orderedInputs = if (resolver != null) {
