@@ -126,7 +126,9 @@ internal class EncodingPipelineOutput(
             }
         }
 
+    @Volatile
     private var audioStreamId: Int? = null
+    @Volatile
     private var videoStreamId: Int? = null
 
     private val audioWriteMutex = Mutex()
@@ -305,14 +307,17 @@ internal class EncodingPipelineOutput(
             coroutineScope.launch(audioOutputDispatcher) {
                 // Audio
                 audioEncoderListener.outputChannel.consumeEach { frame ->
-                    try {
-                        audioWriteMutex.withLock {
-                            audioStreamId?.let { streamId ->
-                                endpointInternal.write(frame, streamId)
+                    audioWriteMutex.withLock {
+                        try {
+                            audioStreamId?.let {
+                                endpointInternal.write(frame, it)
+                            } ?: run {
+                                frame.close()
+                                Logger.w(TAG, "Audio frame received but audio stream is not set")
                             }
-                        } ?: Logger.w(TAG, "Audio frame received but audio stream is not set")
-                    } catch (t: Throwable) {
-                        onInternalError(t)
+                        } catch (t: Throwable) {
+                            onInternalError(t)
+                        }
                     }
                 }
             }
@@ -321,14 +326,17 @@ internal class EncodingPipelineOutput(
             coroutineScope.launch(videoOutputDispatcher) {
                 // Video
                 videoEncoderListener.outputChannel.consumeEach { frame ->
-                    try {
-                        videoWriteMutex.withLock {
-                            videoStreamId?.let { streamId ->
-                                endpointInternal.write(frame, streamId)
+                    videoWriteMutex.withLock {
+                        try {
+                            videoStreamId?.let {
+                                endpointInternal.write(frame, it)
+                            } ?: run {
+                                frame.close()
+                                Logger.w(TAG, "Video frame received but video stream is not set")
                             }
-                        } ?: Logger.w(TAG, "Video frame received but video stream is not set")
-                    } catch (t: Throwable) {
-                        onInternalError(t)
+                        } catch (t: Throwable) {
+                            onInternalError(t)
+                        }
                     }
                 }
             }
@@ -810,14 +818,13 @@ internal class EncodingPipelineOutput(
      * @see [stopStream]
      */
     private suspend fun stopStreamElements() {
-        // Wait for any ongoing writes to complete to avoid stopping encoders
-        // while buffers are still actively being read (which causes SEGV_MAPERR)
-        audioWriteMutex.withLock {
-            audioStreamId = null
-        }
-        videoWriteMutex.withLock {
-            videoStreamId = null
-        }
+        // Disconnect encoders from endpoint to drop trailing frames
+        audioStreamId = null
+        videoStreamId = null
+
+        // Wait for any in-flight endpoint writes to complete before stopping endpoint or resetting encoders
+        audioWriteMutex.withLock {}
+        videoWriteMutex.withLock {}
 
         // Endpoint
         try {
@@ -836,7 +843,9 @@ internal class EncodingPipelineOutput(
                 }
 
                 // Flush remaining frames
-                audioEncoderListener.outputChannel.flush()
+                audioWriteMutex.withLock {
+                    audioEncoderListener.outputChannel.flush()
+                }
 
                 try {
                     it.reset()
@@ -855,7 +864,9 @@ internal class EncodingPipelineOutput(
                 }
 
                 // Flush remaining frames
-                videoEncoderListener.outputChannel.flush()
+                videoWriteMutex.withLock {
+                    videoEncoderListener.outputChannel.flush()
+                }
 
                 try {
                     resetVideoEncoder()
@@ -871,6 +882,11 @@ internal class EncodingPipelineOutput(
 
     private suspend fun releaseUnsafe() = withContext(NonCancellable) {
         _isStreamingFlow.emit(false)
+
+        audioStreamId = null
+        videoStreamId = null
+        audioWriteMutex.withLock {}
+        videoWriteMutex.withLock {}
 
         // Encoders
         try {
