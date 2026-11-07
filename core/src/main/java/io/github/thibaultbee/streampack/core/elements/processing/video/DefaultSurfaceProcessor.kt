@@ -49,8 +49,10 @@ private class DefaultSurfaceProcessor(
     private val cfrFps: Int = 0
 ) : ISurfaceProcessorInternal, SurfaceTexture.OnFrameAvailableListener, ISnapshotable {
     override var isMuted: Boolean = false
+    override var inputResolver: IInputResolver? = null
 
     private val renderer = OpenGlRenderer()
+    private val compositor = MultiInputCompositor(renderer)
 
     private val glHandler = glThread.handler
 
@@ -64,6 +66,7 @@ private class DefaultSurfaceProcessor(
     private val surfaceInputs: MutableList<SurfaceInput> = mutableListOf()
     private val surfaceInputsToTimeConverterMap: MutableMap<SurfaceTexture, VideoTimebaseConverter> =
         hashMapOf()
+    private val surfaceInputsToMatrixMap: MutableMap<SurfaceTexture, FloatArray> = hashMapOf()
 
     // CFR Render loop state
     @Volatile private var latestTimestampNs: Long = 0L
@@ -115,7 +118,11 @@ private class DefaultSurfaceProcessor(
         }
     }
 
-    override fun createInputSurface(surfaceSize: Size, timebase: Timebase): Surface {
+    override fun createInputSurface(
+        surfaceSize: Size,
+        timebase: Timebase,
+        isSecondary: Boolean
+    ): Surface {
         if (isReleaseRequested.get()) {
             throw IllegalStateException("SurfaceProcessor is released")
         }
@@ -128,7 +135,13 @@ private class DefaultSurfaceProcessor(
                 throw IllegalStateException("SurfaceProcessor is released")
             }
 
-            val surfaceTexture = SurfaceTexture(renderer.textureName)
+            val textureId = if (isSecondary) {
+                renderer.createTextureName()
+            } else {
+                renderer.textureName
+            }
+
+            val surfaceTexture = SurfaceTexture(textureId)
             surfaceTexture.setDefaultBufferSize(surfaceSize.width, surfaceSize.height)
             surfaceTexture.setOnFrameAvailableListener(this, glHandler)
             if (dynamicRangeProfile.isHdr) {
@@ -139,11 +152,14 @@ private class DefaultSurfaceProcessor(
                 timebase,
                 TimeUtils.systemTimeProvider
             )
-            SurfaceInput(Surface(surfaceTexture), surfaceTexture)
+            surfaceInputsToMatrixMap[surfaceTexture] = FloatArray(16)
+            val surfaceInput =
+                SurfaceInput(Surface(surfaceTexture), surfaceTexture, textureId, surfaceSize)
+            surfaceInputs.add(surfaceInput)
+            surfaceInput
         }
 
         val surfaceInput = future.get()
-        surfaceInputs.add(surfaceInput)
 
         // Start CFR render loop when input is created, if enabled
         executeSafely {
@@ -171,7 +187,12 @@ private class DefaultSurfaceProcessor(
                 surfaceTexture.release()
                 surface.release()
 
+                if (surfaceInput.textureId != renderer.textureName) {
+                    renderer.deleteTextureName(surfaceInput.textureId)
+                }
+
                 surfaceInputsToTimeConverterMap.remove(surfaceTexture)
+                surfaceInputsToMatrixMap.remove(surfaceTexture)
                 surfaceInputs.remove(surfaceInput)
 
                 if (surfaceInputs.isEmpty() && isRenderLoopRunning) {
@@ -348,6 +369,12 @@ private class DefaultSurfaceProcessor(
         }
     }
 
+    private fun isPrimaryInput(surfaceTexture: SurfaceTexture): Boolean {
+        val resolver = inputResolver ?: return true
+        val input = surfaceInputs.find { it.surfaceTexture == surfaceTexture } ?: return false
+        return !resolver.isSecondaryInput(input.surface)
+    }
+
     // Executed on GL thread
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture) {
         if (isReleaseRequested.get()) {
@@ -363,22 +390,27 @@ private class DefaultSurfaceProcessor(
             Logger.w(TAG, "updateTexImage failed (surface likely released): ${e.message}")
             return
         }
+        val transform = surfaceInputsToMatrixMap[surfaceTexture] ?: FloatArray(16)
+        surfaceTexture.getTransformMatrix(transform)
         surfaceTexture.getTransformMatrix(textureMatrix)
 
-        val timeConverter = surfaceInputsToTimeConverterMap[surfaceTexture]
-        if (timeConverter != null) {
-            latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
+        val isPrimary = isPrimaryInput(surfaceTexture)
+        if (isPrimary) {
+            val timeConverter = surfaceInputsToTimeConverterMap[surfaceTexture]
+            if (timeConverter != null) {
+                latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
+            }
         }
         
         hasFirstFrame = true
 
-        if (cfrFps == 0) {
+        if (cfrFps == 0 && isPrimary) {
             // Standard event-driven render
             renderLatestFrame()
         }
 
         // Surface, size and transform matrix for JPEG Surface if exists
-        if (pendingSnapshots.isNotEmpty()) {
+        if (pendingSnapshots.isNotEmpty() && isPrimary) {
             try {
                 val bitmapSurface =
                     surfaceOutputs.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
@@ -397,7 +429,7 @@ private class DefaultSurfaceProcessor(
 
     // Executed on GL thread continuously (CFR) or onFrameAvailable (Event-driven)
     private fun renderLatestFrame() {
-        if (!hasFirstFrame) return
+        if (!hasFirstFrame || surfaceInputs.isEmpty()) return
 
         val renderTimestampNs = if (cfrFps > 0) {
             System.nanoTime()
@@ -405,6 +437,25 @@ private class DefaultSurfaceProcessor(
             latestTimestampNs
         }
 
+        val resolver = inputResolver
+        if (resolver == null) {
+            renderSingleInput(renderTimestampNs)
+        } else {
+            compositor.render(
+                renderTimestampNs,
+                surfaceInputs,
+                surfaceInputsToMatrixMap,
+                surfaceOutputs.filterIsInstance<SurfaceOutput>(),
+                resolver,
+                isMuted,
+                surfaceOutputMatrix
+            )
+        }
+    }
+
+    // Upstream path: draws the primary input only. Also used while a source switch briefly
+    // holds two inputs without a dual source, so the incoming input is never shown as PiP.
+    private fun renderSingleInput(renderTimestampNs: Long) {
         surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach {
             try {
                 it.updateTransformMatrix(surfaceOutputMatrix, textureMatrix)
@@ -517,8 +568,6 @@ private class DefaultSurfaceProcessor(
     companion object {
         private const val TAG = "SurfaceProcessor"
     }
-
-    private data class SurfaceInput(val surface: Surface, val surfaceTexture: SurfaceTexture)
 
     private data class PendingSnapshot(
         @IntRange(from = 0, to = 359)
