@@ -673,8 +673,6 @@ internal class EncodingPipelineOutput(
         }
 
         try {
-            _isStreamingFlow.emit(true)
-
             val streams = mutableListOf<CodecConfig>()
             val orientedVideoConfig = videoCodecConfig?.let {
                 /**
@@ -696,6 +694,10 @@ internal class EncodingPipelineOutput(
             }
             audioCodecConfig?.let { audioStreamId = streamsIdMap[it] }
 
+            endpointInternal.startStream()
+
+            _isStreamingFlow.emit(true)
+
             streamEventListener?.onStartStream()
 
             val audioEncoderJob = audioEncoderInternal?.let {
@@ -712,11 +714,15 @@ internal class EncodingPipelineOutput(
 
             audioEncoderJob?.join()
             videoEncoderJob?.join()
-
-            endpointInternal.startStream()
         } catch (t: Throwable) {
             withContext(NonCancellable) {
-                stopStreamUnsafe()
+                stopStreamElements()
+                _isStreamingFlow.emit(false)
+                try {
+                    streamEventListener?.onStopStream()
+                } catch (stopThrowable: Throwable) {
+                    Logger.w(TAG, "Can't stop stream: ${stopThrowable.message}")
+                }
             }
             throw t
         }
