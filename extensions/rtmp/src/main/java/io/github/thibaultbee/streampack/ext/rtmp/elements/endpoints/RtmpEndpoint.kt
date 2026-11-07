@@ -45,6 +45,7 @@ import io.github.thibaultbee.streampack.ext.flv.elements.endpoints.composites.mu
 import io.github.thibaultbee.streampack.ext.rtmp.configuration.mediadescriptor.RtmpMediaDescriptor
 import io.ktor.network.selector.SelectorManager
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
@@ -100,9 +101,14 @@ class RtmpEndpoint internal constructor(
     )
     private val flvTagBuilder = FlvTagBuilder(flvTagChannel)
 
-    private val selectorManager = SelectorManager(ioDispatcher)
+    private val rtmpExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Logger.w(TAG, "Uncaught exception in RTMP socket scope (ignored to prevent crash): $throwable")
+    }
+    private val selectorManager = SelectorManager(ioDispatcher + rtmpExceptionHandler)
     private val connectionBuilder = RtmpConnectionBuilder(selectorManager)
     private var rtmpClient: RtmpClient? = null
+    @Volatile
+    private var isStarted = false
 
     private var startUpTimestamp = INVALID_TIMESTAMP
     private val timestampMutex = Mutex()
@@ -179,7 +185,7 @@ class RtmpEndpoint internal constructor(
                 }
 
                 resetMetrics()
-                val client = kotlinx.coroutines.withTimeoutOrNull(5000L) {
+                val client = kotlinx.coroutines.withTimeoutOrNull(10000L) {
                     if (descriptor.connectInfo != null) {
                         connectionBuilder.connect(
                             descriptor.uri.toString(),
@@ -191,7 +197,7 @@ class RtmpEndpoint internal constructor(
                 }
 
                 if (client == null) {
-                    throw IOException("RTMP connection timeout after 5 seconds")
+                    throw IOException("RTMP connection timeout after 10 seconds")
                 }
 
                 rtmpClient = client.apply {
@@ -199,6 +205,7 @@ class RtmpEndpoint internal constructor(
 
                     socketContext.invokeOnCompletion { throwable ->
                         rtmpClient = null
+                        isStarted = false
 
                         _isOpenFlow.tryEmit(false)
                         if (throwable != null) {
@@ -251,7 +258,7 @@ class RtmpEndpoint internal constructor(
     override suspend fun write(
         frame: Frame, streamPid: Int
     ) {
-        if (!_isOpenFlow.value) {
+        if (!_isOpenFlow.value || !isStarted) {
             frame.close()
             return
         }
@@ -269,7 +276,7 @@ class RtmpEndpoint internal constructor(
         flvTagBuilder.addStream(streamConfig)
 
     override suspend fun startStream() {
-        kotlinx.coroutines.withTimeoutOrNull(5000L) {
+        kotlinx.coroutines.withTimeoutOrNull(10000L) {
             safeClient { rtmpClient ->
                 rtmpClient.createStream()
                 rtmpClient.publish(StreamPublishType.LIVE)
@@ -277,11 +284,13 @@ class RtmpEndpoint internal constructor(
                 rtmpClient.writeSetDataFrame(
                     flvTagBuilder.metadata
                 )
+                isStarted = true
             }
-        } ?: throw IOException("RTMP startStream timeout after 5 seconds")
+        } ?: throw IOException("RTMP startStream timeout after 10 seconds")
     }
 
     override suspend fun stopStream() {
+        isStarted = false
         try {
             mutex.withLock {
                 if (rtmpClient?.isClosed == false) {
@@ -306,6 +315,7 @@ class RtmpEndpoint internal constructor(
     }
 
     override suspend fun close() {
+        isStarted = false
         mutex.withLock {
             try {
                 val closed = kotlinx.coroutines.withTimeoutOrNull(2000L) {
@@ -342,6 +352,32 @@ class RtmpEndpoint internal constructor(
 
         init {
             System.setProperty("kotlinx.io.pool.size.bytes", "4194304") // 4MB
+            installSafeRtmpUncaughtExceptionHandler()
+        }
+
+        @Volatile
+        private var handlerInstalled = false
+
+        private fun installSafeRtmpUncaughtExceptionHandler() {
+            if (handlerInstalled) return
+            synchronized(this) {
+                if (handlerInstalled) return
+                val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+                Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                    val isKomuxerCommandError = throwable.stackTrace.any {
+                        it.className.startsWith("io.github.komedia.komuxer.rtmp.")
+                    } && (throwable is IllegalArgumentException || throwable.cause is ClassCastException)
+                    if (isKomuxerCommandError) {
+                        Logger.w(
+                            TAG,
+                            "Ignored uncaught komuxer RTMP command parsing exception on thread ${thread.name}: $throwable"
+                        )
+                    } else {
+                        previousHandler?.uncaughtException(thread, throwable)
+                    }
+                }
+                handlerInstalled = true
+            }
         }
     }
 }
