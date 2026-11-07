@@ -26,6 +26,7 @@ import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.I
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
 import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.sources.video.IPreviewableSource
+import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProcessorAwareSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceSourceInternal
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal
@@ -180,7 +181,12 @@ internal class VideoInput(
                     }
                 }
 
-                if ((previousVideoSource is CameraSource) && (videoSourceFactory is CameraSourceFactory)) {
+                if (previousVideoSource != null && (
+                        previousVideoSource is ISurfaceProcessorAwareSource ||
+                        videoSourceFactory is ISurfaceProcessorAwareSource.Factory ||
+                        (previousVideoSource is CameraSource && videoSourceFactory is CameraSourceFactory)
+                    )
+                ) {
                     /**
                      * It is not possible to have 2 camera sources at the same time because of
                      * camera2 API. If the new video source is a camera source and the current one
@@ -193,6 +199,18 @@ internal class VideoInput(
                             TAG,
                             "setVideoSource: Can't stop previous video source: ${t.message}"
                         )
+                    }
+                    if (previousVideoSource is ISurfaceSourceInternal) {
+                        try {
+                            val surface = previousVideoSource.getOutput()
+                            previousVideoSource.resetOutput()
+                            surface?.let { processor.removeInputSurface(it) }
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Can't reset previous video source output: ${t.message}"
+                            )
+                        }
                     }
                     try {
                         previousVideoSource.release()
@@ -312,7 +330,6 @@ internal class VideoInput(
         }
     }
 
-
     suspend fun setSourceConfig(newVideoSourceConfig: VideoSourceConfig) {
         if (isReleaseRequested.get()) {
             throw IllegalStateException("Input is released")
@@ -379,6 +396,9 @@ internal class VideoInput(
         surfaceProcessor: ISurfaceProcessorInternal,
         videoSource: IVideoSourceInternal? = sourceInternalFlow.value,
     ) {
+        if (videoSource is ISurfaceProcessorAwareSource) {
+            videoSource.setSurfaceProcessor(surfaceProcessor)
+        }
         // Adds surface processor input
         if (videoSource is ISurfaceSourceInternal) {
             videoSource.setOutput(

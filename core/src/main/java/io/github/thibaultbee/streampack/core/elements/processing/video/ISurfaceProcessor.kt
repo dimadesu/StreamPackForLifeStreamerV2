@@ -16,10 +16,12 @@
 package io.github.thibaultbee.streampack.core.elements.processing.video
 
 import android.content.Context
+import android.graphics.RectF
 import android.util.Size
 import android.view.Surface
 import io.github.thibaultbee.streampack.core.elements.interfaces.Releasable
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.ISurfaceOutput
+import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRangeProfile
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
@@ -55,7 +57,17 @@ interface ISurfaceProcessor {
  */
 @SubclassOptInRequired(InternalStreamPackApi::class)
 interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
-    fun createInputSurface(surfaceSize: Size, timebase: Timebase): Surface
+    /**
+     * Optional resolver giving per-input information when several sources feed the processor
+     * (e.g. each camera of a concurrent dual camera source). `null` keeps the single input behavior.
+     */
+    var inputResolver: IInputResolver?
+
+    fun createInputSurface(
+        surfaceSize: Size,
+        timebase: Timebase,
+        isSecondary: Boolean = false
+    ): Surface
 
     fun removeInputSurface(surface: Surface)
 
@@ -69,4 +81,25 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
 
     fun removeAllOutputSurfaces()
 
+}
+
+/**
+ * Gives the processor per-input information when it composites several inputs.
+ */
+interface IInputResolver {
+    /**
+     * Whether [inputSurface] is a secondary input, drawn on top of the primary one.
+     */
+    fun isSecondaryInput(inputSurface: Surface): Boolean
+
+    /**
+     * The info provider of the source feeding [inputSurface].
+     */
+    fun getInfoProvider(inputSurface: Surface): ISourceInfoProvider
+
+    /**
+     * Normalized target rectangle `[0..1]` for [inputSurface], or `null` if [inputSurface]
+     * does not belong to this resolver.
+     */
+    fun getTargetRect(inputSurface: Surface): RectF?
 }

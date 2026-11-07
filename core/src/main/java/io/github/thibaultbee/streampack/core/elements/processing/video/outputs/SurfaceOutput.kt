@@ -116,6 +116,39 @@ class SurfaceOutput(
         )
     }
 
+    // Per-input transforms for composited rendering, keyed by the input's info provider.
+    private val overrideTransforms = hashMapOf<ISourceInfoProvider, FloatArray>()
+
+    fun updateTransformMatrix(
+        output: FloatArray,
+        input: FloatArray,
+        overrideInfoProvider: ISourceInfoProvider
+    ) {
+        val transform = overrideTransforms.getOrPut(overrideInfoProvider) {
+            if (overrideTransforms.size >= MAX_OVERRIDE_TRANSFORMS) {
+                overrideTransforms.clear()
+            }
+            FloatArray(16).also {
+                // Same rule as single source outputs: mirroring only applies when this
+                // output asks for it (e.g. preview), and then only to mirrored sources
+                // such as the front camera. The stream is never mirrored.
+                calculateAdditionalTransform(
+                    it,
+                    FloatArray(16),
+                    overrideInfoProvider,
+                    overrideInfoProvider.getRelativeRotationDegrees(
+                        targetRotation,
+                        needMirroring
+                    ),
+                    needMirroring && overrideInfoProvider.isMirror
+                )
+            }
+        }
+        Matrix.multiplyMM(
+            output, 0, input, 0, transform, 0
+        )
+    }
+
     /**
      * Calculates the additional GL transform and saves it to additionalTransform.
      *
@@ -139,7 +172,9 @@ class SurfaceOutput(
     private fun calculateAdditionalTransform(
         additionalTransform: FloatArray,
         invertedTransform: FloatArray,
-        sourceInfoProvider: ISourceInfoProvider
+        sourceInfoProvider: ISourceInfoProvider,
+        relativeRotationDegrees: Int = rotationDegrees,
+        mirror: Boolean = needMirroring
     ) {
         Matrix.setIdentityM(additionalTransform, 0)
 
@@ -153,10 +188,10 @@ class SurfaceOutput(
         additionalTransform.preVerticalFlip(0.5f)
 
         // Rotation
-        additionalTransform.preRotate(rotationDegrees.toFloat(), 0.5f, 0.5f)
+        additionalTransform.preRotate(relativeRotationDegrees.toFloat(), 0.5f, 0.5f)
 
         // Mirroring
-        if (needMirroring) {
+        if (mirror) {
             Matrix.translateM(additionalTransform, 0, 1f, 0f, 0f)
             Matrix.scaleM(additionalTransform, 0, -1f, 1f, 1f)
         }
@@ -196,7 +231,7 @@ class SurfaceOutput(
         // Applies the camera sensor orientation if the input surface contains camera transform.
         // Rotation
         invertedTextureTransform.preRotate(
-            sourceRotationDegrees.toFloat(),
+            sourceInfoProvider.rotationDegrees.toFloat(),
             0.5f,
             0.5f
         )
@@ -209,5 +244,9 @@ class SurfaceOutput(
 
         // Invert the matrix so it can be used to "undo" the SurfaceTexture#getTransformMatrix.
         Matrix.invertM(invertedTextureTransform, 0, invertedTextureTransform, 0)
+    }
+
+    private companion object {
+        const val MAX_OVERRIDE_TRANSFORMS = 4
     }
 }
