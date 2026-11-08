@@ -1,5 +1,5 @@
 [versions]
-agp = "8.12.2"
+agp = "9.2.1"
 concurrentFutures = "1.3.0"
 datastorePreference = "1.2.1"
 videoApiClient = "1.6.7"
