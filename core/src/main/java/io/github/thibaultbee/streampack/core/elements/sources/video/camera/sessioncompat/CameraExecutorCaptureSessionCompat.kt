@@ -28,6 +28,7 @@ import androidx.annotation.RequiresApi
 import androidx.annotation.RequiresPermission
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraException
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CameraDispatcherProvider
+import io.github.thibaultbee.streampack.core.logger.Logger
 
 /**
  * A [ICameraCaptureSessionCompat] that manages camera API >= 28.
@@ -69,7 +70,16 @@ internal class CameraExecutorCaptureSessionCompat(dispatcherProvider: CameraDisp
             callback
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            if (!camera.isSessionConfigurationSupported(sessionConfig)) {
+            val isSupported = try {
+                camera.isSessionConfigurationSupported(sessionConfig)
+            } catch (e: UnsupportedOperationException) {
+                Logger.w(
+                    TAG,
+                    "Session configuration query is not supported for camera ${camera.id}: ${e.message}"
+                )
+                true
+            }
+            if (!isSupported) {
                 throw CameraException(
                     "Session configuration is not supported for camera ${camera.id}"
                 )
