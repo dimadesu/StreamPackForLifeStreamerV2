@@ -156,11 +156,11 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
         requireNotNull(outputSurface) { "Output surface must be set before starting stream" }
 
         _isStreamingFlow.emit(true)
-        outputScheduler = outputExecutor.scheduleWithFixedDelay(
+        outputScheduler = outputExecutor.scheduleAtFixedRate(
             ::drawOutput,
             0,
-            1000 / sourceConfig.fps.toLong(),
-            TimeUnit.MILLISECONDS
+            1_000_000_000L / sourceConfig.fps.toLong(),
+            TimeUnit.NANOSECONDS
         )
     }
 
