@@ -56,6 +56,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 interface IPreviewSurfaceProvider {
     /**
+     * Called when a video source change begins.
+     * Implementations can use this to hide the previous frame (e.g. showing a black cover)
+     * before the outgoing source is released.
+     *
+     * @param previousVideoSource the outgoing video source being replaced, if any
+     */
+    suspend fun onSourceSwitchingStart(previousVideoSource: IVideoSource?) {}
+
+    /**
      * Called before a new previewable video source starts during a source change.
      * Implementations should attach the preview surface to [videoSource] so that the
      * initial capture session can be configured with all outputs at once.
@@ -206,6 +215,15 @@ internal class VideoInput(
                 }
 
                 isStreamingJob.cancel()
+
+                try {
+                    previewSurfaceProvider?.onSourceSwitchingStart(previousVideoSource)
+                } catch (t: Throwable) {
+                    Logger.w(
+                        TAG,
+                        "setVideoSource: Failed to notify preview provider of switch start: ${t.message}"
+                    )
+                }
 
                 val wasReleasedEarly = previousVideoSource != null && (
                         previousVideoSource is ISurfaceProcessorAwareSource ||

@@ -21,6 +21,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.TotalCaptureResult
 import android.util.Size
 import android.view.Surface
 import androidx.annotation.RequiresPermission
@@ -35,6 +36,7 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CameraSizes
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CameraSurface
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CaptureRequestWithTargetsBuilder
+import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CaptureResultListener
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.logger.Logger
 import io.github.thibaultbee.streampack.core.utils.InternalStreamPackApi
@@ -203,6 +205,15 @@ internal class CameraSource(
             controller.addTarget(PREVIEW_NAME)
             _isPreviewingFlow.emit(true)
         }
+    }
+
+    override suspend fun setOnFirstFrameListener(listener: () -> Unit) {
+        controller.addCaptureCallbackListener(object : CaptureResultListener {
+            override fun onCaptureResult(result: TotalCaptureResult): Boolean {
+                listener()
+                return true
+            }
+        })
     }
 
     @SuppressLint("MissingPermission")

@@ -118,6 +118,16 @@ interface IPreviewableSource {
      * @return the preview size
      */
     fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size
+
+    /**
+     * Registers a one-shot listener called when the first frame is produced for the preview.
+     * Default implementation invokes the listener immediately.
+     *
+     * @param listener callback invoked when the first frame is ready
+     */
+    suspend fun setOnFirstFrameListener(listener: () -> Unit) {
+        listener()
+    }
 }
 
 /**

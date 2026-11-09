@@ -47,6 +47,7 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProc
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraSettings
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ICameraSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.getCameraCharacteristics
+import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.utils.ConflatedJob
 import io.github.thibaultbee.streampack.core.elements.utils.MeteringPointFactory
 import io.github.thibaultbee.streampack.core.elements.utils.OrientationUtils
@@ -59,6 +60,7 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -556,6 +558,10 @@ class PreviewView @JvmOverloads constructor(
         }
     }
 
+    override suspend fun onSourceSwitchingStart(previousVideoSource: IVideoSource?) {
+        setCoverVisible(true)
+    }
+
     override suspend fun onPreparePreview(videoSource: IPreviewableSource) {
         val builder = withContext(mainDispatcher) {
             if (!isAttachedToWindow || display == null) {
@@ -607,20 +613,42 @@ class PreviewView @JvmOverloads constructor(
             // Check if surface is valid before using it
             if (!surface.isValid) {
                 Logger.w(TAG, "Surface is not valid, skipping preview start")
+                setCoverVisible(false)
                 listener?.onPreviewFailed(IllegalStateException("Surface is not valid"))
                 return
             }
+
+            var isFirstFrameHandled = false
+            val onFirstFrame = {
+                if (!isFirstFrameHandled) {
+                    isFirstFrameHandled = true
+                    setCoverVisible(false)
+                    listener?.onFirstFrame()
+                }
+            }
+
+            // Fallback safety timeout so cover is never stuck visible if the camera halts
+            val safetyTimeoutJob = defaultScope.launch {
+                delay(1500)
+                onFirstFrame()
+            }
+
+            videoSource.setOnFirstFrameListener {
+                safetyTimeoutJob.cancel()
+                onFirstFrame()
+            }
+
             videoSource.previewMutex.withLock {
                 videoSource.startPreview(surface)
             }
             Logger.d(TAG, "Preview started")
-            setCoverVisible(false)
             listener?.onPreviewStarted()
         } catch (e: kotlinx.coroutines.CancellationException) {
             Logger.d(TAG, "Start preview cancelled")
             throw e
         } catch (t: Throwable) {
             Logger.e(TAG, "Failed to start preview: $t")
+            setCoverVisible(false)
             listener?.onPreviewFailed(t)
         }
     }
@@ -815,6 +843,11 @@ class PreviewView @JvmOverloads constructor(
          * Called when the preview failed to start.
          */
         fun onPreviewFailed(t: Throwable) {}
+
+        /**
+         * Called when the first frame has been rendered to the preview.
+         */
+        fun onFirstFrame() {}
     }
 
     /**
