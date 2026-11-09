@@ -168,8 +168,9 @@ internal class CameraSource(
 
     @RequiresPermission(Manifest.permission.CAMERA)
     override suspend fun configure(config: VideoSourceConfig) {
-        if (!characteristics.isFpsSupported(config.fps)) {
-            Logger.w(TAG, "Camera $cameraId does not support ${config.fps} fps")
+        val targetFps = config.cameraFps ?: config.fps
+        if (!characteristics.isFpsSupported(targetFps)) {
+            Logger.w(TAG, "Camera $cameraId does not support $targetFps fps")
         }
 
         try {
@@ -178,7 +179,7 @@ internal class CameraSource(
             Logger.w(TAG, "Failed to set dynamic range profile: ${t.message}")
         }
         try {
-            controller.setFps(config.fps)
+            controller.setFps(targetFps)
         } catch (t: Throwable) {
             Logger.w(TAG, "Failed to set fps: ${t.message}")
         }

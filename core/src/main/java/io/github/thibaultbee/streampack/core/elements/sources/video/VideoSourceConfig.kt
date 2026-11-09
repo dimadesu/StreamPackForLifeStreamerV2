@@ -12,7 +12,7 @@ data class VideoSourceConfig(
     val resolution: Size = DEFAULT_RESOLUTION,
 
     /**
-     * Video framerate.
+     * Video framerate (encoder framerate).
      */
     val fps: Int = DEFAULT_FPS,
 
@@ -21,7 +21,12 @@ data class VideoSourceConfig(
      *
      * **See Also:** [DynamicRangeProfiles](https://developer.android.com/reference/android/hardware/camera2/params/DynamicRangeProfiles)
      */
-    val dynamicRangeProfile: DynamicRangeProfile = DynamicRangeProfile.sdr
+    val dynamicRangeProfile: DynamicRangeProfile = DynamicRangeProfile.sdr,
+
+    /**
+     * Camera framerate in frames per second, if different from [fps].
+     */
+    val cameraFps: Int? = null
 ) {
     /**
      * The Android dynamic range profile.

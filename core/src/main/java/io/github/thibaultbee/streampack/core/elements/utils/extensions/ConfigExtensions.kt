@@ -75,7 +75,7 @@ val AudioCodecConfig.sourceConfig: AudioSourceConfig
  * @return `true` if [VideoSourceConfig] is compatible with [VideoSourceConfig], `false` otherwise
  */
 fun VideoSourceConfig.isCompatibleWith(sourceConfig: VideoSourceConfig): Boolean {
-    return (fps == sourceConfig.fps) && (dynamicRangeProfile == sourceConfig.dynamicRangeProfile)
+    return (fps == sourceConfig.fps) && (cameraFps == sourceConfig.cameraFps) && (dynamicRangeProfile == sourceConfig.dynamicRangeProfile)
 }
 
 /**
@@ -85,7 +85,7 @@ fun VideoSourceConfig.isCompatibleWith(sourceConfig: VideoSourceConfig): Boolean
  * @return `true` if [VideoSourceConfig] is compatible with [VideoSourceConfig], `false` otherwise
  */
 fun VideoCodecConfig.isCompatibleWith(sourceConfig: VideoSourceConfig): Boolean {
-    return ((cameraFps ?: fps) == sourceConfig.fps) && (dynamicRangeProfile == sourceConfig.dynamicRangeProfile)
+    return (fps == sourceConfig.fps) && (cameraFps == sourceConfig.cameraFps) && (dynamicRangeProfile == sourceConfig.dynamicRangeProfile)
 }
 
 /**
@@ -106,6 +106,7 @@ fun VideoCodecConfig.isCompatibleWith(codecConfig: VideoCodecConfig): Boolean {
 val VideoCodecConfig.sourceConfig: VideoSourceConfig
     get() = VideoSourceConfig(
         resolution = resolution,
-        fps = cameraFps ?: fps,
-        dynamicRangeProfile = dynamicRangeProfile
+        fps = fps,
+        dynamicRangeProfile = dynamicRangeProfile,
+        cameraFps = cameraFps
     )
