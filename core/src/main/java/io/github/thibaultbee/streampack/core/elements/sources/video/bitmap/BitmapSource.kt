@@ -248,7 +248,7 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
             try {
                 ensureCompositedBitmapsGenerated()
                 
-                val canvas = surface.lockCanvas(null) ?: return@let
+                val canvas = surface.lockHardwareCanvas() ?: return@let
                 
                 // Single drawBitmap call - source and noise pre-composited
                 val bitmapToDraw = if (compositedBitmaps.isNotEmpty()) {
@@ -274,7 +274,7 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
             try {
                 val bitmapToDraw = activeBitmap
                 if (bitmapToDraw.isRecycled) return@let
-                val canvas = it.lockCanvas(null) ?: return@let
+                val canvas = it.lockHardwareCanvas() ?: return@let
                 canvas.drawBitmap(bitmapToDraw, 0f, 0f, null)
                 it.unlockCanvasAndPost(canvas)
             } catch (e: Exception) {
