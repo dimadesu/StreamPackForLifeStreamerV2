@@ -51,6 +51,21 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
+ * Interface for preview providers (such as PreviewView) to coordinate preview surface
+ * lifecycle with [IVideoInput].
+ */
+interface IPreviewSurfaceProvider {
+    /**
+     * Called before a new previewable video source starts during a source change.
+     * Implementations should attach the preview surface to [videoSource] so that the
+     * initial capture session can be configured with all outputs at once.
+     *
+     * @param videoSource the new previewable video source being prepared
+     */
+    suspend fun onPreparePreview(videoSource: IPreviewableSource)
+}
+
+/**
  * The public interface for the video input.
  * It provides access to the video source, the video processor, and the streaming state.
  */
@@ -76,6 +91,13 @@ interface IVideoInput : ISnapshotable {
         set(value) {
             processor.isMuted = value
         }
+
+    /**
+     * A provider for preview surfaces.
+     * When set, allows the preview to attach to a new video source before streaming starts,
+     * avoiding redundant camera session restarts.
+     */
+    var previewSurfaceProvider: IPreviewSurfaceProvider?
 
     /**
      * Sets the video source.
@@ -123,6 +145,8 @@ internal class VideoInput(
     override var processor: ISurfaceProcessorInternal =
         surfaceProcessorFactory.create(context, dynamicRangeProfileHint, dispatcherProvider)
         private set
+
+    override var previewSurfaceProvider: IPreviewSurfaceProvider? = null
 
     // SOURCE
     private val sourceInternalFlow = MutableStateFlow<IVideoSourceInternal?>(null)
@@ -254,6 +278,17 @@ internal class VideoInput(
                     TAG, "Video source configuration is not set"
                 )
 
+                if (newVideoSource is IPreviewableSource) {
+                    try {
+                        previewSurfaceProvider?.onPreparePreview(newVideoSource)
+                    } catch (t: Throwable) {
+                        Logger.w(
+                            TAG,
+                            "setVideoSource: Failed to prepare preview on new video source: ${t.message}"
+                        )
+                    }
+                }
+
                 infoProviderJob += coroutineScope.launch {
                     /**
                      * First emission is the current value, we skip it.
@@ -275,7 +310,7 @@ internal class VideoInput(
                     Logger.e(TAG, "Starting new video source streaming")
                     if (!wasReleasedEarly) {
                         try {
-                            previousVideoSource?.stopStream()
+                            previousVideoSource.stopStream()
                         } catch (t: Throwable) {
                             Logger.w(
                                 TAG,

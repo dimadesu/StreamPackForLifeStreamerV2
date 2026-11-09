@@ -234,7 +234,7 @@ internal class CameraController(
         // Re-add targets that are in the new outputs (identified by their name)
         captureRequestBuilder?.let {
             val targets = outputs.values.filter { output ->
-                it.hasTarget(output)
+                it.hasTarget(output.name)
             }
             it.clearTargets()
             if (targets.isNotEmpty()) {

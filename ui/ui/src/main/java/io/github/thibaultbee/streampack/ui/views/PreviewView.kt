@@ -53,6 +53,7 @@ import io.github.thibaultbee.streampack.core.elements.utils.OrientationUtils
 import io.github.thibaultbee.streampack.core.elements.utils.extensions.runningHistoryNotNull
 import io.github.thibaultbee.streampack.core.interfaces.IWithVideoSource
 import io.github.thibaultbee.streampack.core.logger.Logger
+import io.github.thibaultbee.streampack.core.pipelines.inputs.IPreviewSurfaceProvider
 import io.github.thibaultbee.streampack.ui.R
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -79,7 +80,7 @@ import kotlinx.coroutines.withContext
  */
 class PreviewView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyle: Int = 0
-) : FrameLayout(context, attrs, defStyle) {
+) : FrameLayout(context, attrs, defStyle), IPreviewSurfaceProvider {
     private val viewfinder = CameraViewfinder(context, attrs, defStyle)
 
     /**
@@ -298,6 +299,7 @@ class PreviewView @JvmOverloads constructor(
                 /**
                  * If streamer is not the same, we stop the previous previewing one.
                  */
+                streamer?.videoInput?.previewSurfaceProvider = null
                 val previousSource = streamer?.videoInput?.sourceFlow?.value as? IPreviewableSource
                 previousSource?.let {
                     it.previewMutex.withLock {
@@ -315,6 +317,7 @@ class PreviewView @JvmOverloads constructor(
 
                 streamer = newStreamer
                 if (newStreamer != null) {
+                    newStreamer.videoInput.previewSurfaceProvider = this@PreviewView
                     collectSource(newStreamer)
                 } else {
                     sourceJob.cancel()
@@ -383,11 +386,13 @@ class PreviewView @JvmOverloads constructor(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         Logger.d(TAG, "onAttachedToWindow")
+        streamer?.videoInput?.previewSurfaceProvider = this
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         Logger.d(TAG, "onDetachedFromWindow")
+        streamer?.videoInput?.previewSurfaceProvider = null
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -549,6 +554,39 @@ class PreviewView @JvmOverloads constructor(
         startPreviewJob += defaultScope.launch {
             startPreview(videoSource, builder)
         }
+    }
+
+    override suspend fun onPreparePreview(videoSource: IPreviewableSource) {
+        val builder = withContext(mainDispatcher) {
+            if (!isAttachedToWindow || display == null) {
+                Logger.d(TAG, "onPreparePreview: view not attached or display null")
+                return@withContext null
+            }
+            val currentSize = size
+            if (currentSize.width == 0 || currentSize.height == 0) {
+                Logger.d(TAG, "onPreparePreview: view size is 0")
+                return@withContext null
+            }
+            val currentRotation = display.rotation
+            val previewSize = getPreviewSize(videoSource, currentSize)
+            Logger.i(TAG, "onPreparePreview: Preparing preview with size ($previewSize) for ($currentSize)")
+            val builder = ViewfinderSurfaceRequest.Builder(previewSize)
+            if (videoSource is ICameraSource && videoSource !is ISurfaceProcessorAwareSource) {
+                val cameraCharacteristics =
+                    context.getCameraCharacteristics(videoSource.cameraId)
+                builder.populateFromCharacteristics(cameraCharacteristics)
+            } else {
+                val rotationDegrees = OrientationUtils.getSurfaceRotationDegrees(currentRotation)
+                builder.setSourceOrientation(rotationDegrees)
+            }
+            lastRequestedSize = currentSize
+            lastRequestedRotation = currentRotation
+            lastRequestedVideoSource = videoSource
+            builder
+        } ?: return
+
+        startPreviewJob.cancel()
+        startPreview(videoSource, builder)
     }
 
     private suspend fun startPreview(
