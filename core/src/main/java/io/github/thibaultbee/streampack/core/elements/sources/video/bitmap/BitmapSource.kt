@@ -68,11 +68,17 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
     private val _isPreviewingFlow = MutableStateFlow(false)
     override val isPreviewingFlow = _isPreviewingFlow.asStateFlow()
 
+    private var scaledBitmap: Bitmap? = null
+
+    private val activeBitmap: Bitmap
+        get() = scaledBitmap?.takeIf { !it.isRecycled } ?: bitmap
+
     /**
      * Gets the size of the bitmap.
      */
     override fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size {
-        return Size(bitmap.width, bitmap.height)
+        val current = activeBitmap
+        return Size(current.width, current.height)
     }
 
     override suspend fun hasPreview() = previewSurface != null
@@ -118,6 +124,30 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
             "Bitmap source does not support HDR"
         }
         videoSourceConfig = config
+
+        // Downscale bitmap if it exceeds the target resolution while preserving aspect ratio
+        val targetWidth = config.resolution.width
+        val targetHeight = config.resolution.height
+        if (!bitmap.isRecycled && (bitmap.width > targetWidth || bitmap.height > targetHeight)) {
+            val scale = minOf(
+                targetWidth.toFloat() / bitmap.width,
+                targetHeight.toFloat() / bitmap.height
+            )
+            val newWidth = (bitmap.width * scale).toInt().coerceAtLeast(1)
+            val newHeight = (bitmap.height * scale).toInt().coerceAtLeast(1)
+
+            if (scaledBitmap?.width != newWidth || scaledBitmap?.height != newHeight) {
+                compositedBitmaps.forEach { it.recycle() }
+                compositedBitmaps.clear()
+                scaledBitmap?.recycle()
+                scaledBitmap = Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
+            }
+        } else if (scaledBitmap != null) {
+            compositedBitmaps.forEach { it.recycle() }
+            compositedBitmaps.clear()
+            scaledBitmap?.recycle()
+            scaledBitmap = null
+        }
     }
 
     override suspend fun startStream() {
@@ -155,9 +185,11 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
             // Ignore
         }
         
-        // Now safe to recycle pre-composited bitmaps
+        // Now safe to recycle pre-composited bitmaps and scaled bitmap
         compositedBitmaps.forEach { it.recycle() }
         compositedBitmaps.clear()
+        scaledBitmap?.recycle()
+        scaledBitmap = null
     }
 
     // Pre-composited bitmaps (source + noise combined) for maximum performance
@@ -181,15 +213,17 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
     private fun ensureCompositedBitmapsGenerated() {
         if (compositedBitmaps.isNotEmpty()) return
         
-        val width = bitmap.width
-        val height = bitmap.height
+        val sourceBitmap = activeBitmap
+        if (sourceBitmap.isRecycled) return
+        val width = sourceBitmap.width
+        val height = sourceBitmap.height
         // Use 10,000 noise points - fast to generate
         // With strokeWidth=3, each point covers ~9 pixels for decent coverage
         val noisePointCount = 10000
         
         for (i in 0 until frameCount) {
             // Create a copy of the source bitmap with noise baked in
-            val composited = bitmap.copy(Bitmap.Config.ARGB_8888, true) ?: continue
+            val composited = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true) ?: continue
             val canvas = android.graphics.Canvas(composited)
             
             // Draw noise points directly onto the copy
@@ -220,7 +254,7 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
                 val bitmapToDraw = if (compositedBitmaps.isNotEmpty()) {
                     compositedBitmaps.getOrNull(frameIndex % compositedBitmaps.size)?.takeIf { !it.isRecycled }
                 } else {
-                    bitmap.takeIf { !it.isRecycled }
+                    activeBitmap.takeIf { !it.isRecycled }
                 }
                 
                 if (bitmapToDraw != null) {
@@ -238,9 +272,10 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
     private fun drawPreview() {
         previewSurface?.let {
             try {
-                if (bitmap.isRecycled) return@let
+                val bitmapToDraw = activeBitmap
+                if (bitmapToDraw.isRecycled) return@let
                 val canvas = it.lockCanvas(null) ?: return@let
-                canvas.drawBitmap(bitmap, 0f, 0f, null)
+                canvas.drawBitmap(bitmapToDraw, 0f, 0f, null)
                 it.unlockCanvasAndPost(canvas)
             } catch (e: Exception) {
                 // Ignore drawing errors
@@ -250,7 +285,8 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
 
     private inner class SourceInfoProvider : DefaultSourceInfoProvider(rotationDegrees = 0) {
         override fun getSurfaceSize(targetResolution: Size): Size {
-            return Size(bitmap.width, bitmap.height)
+            val current = activeBitmap
+            return Size(current.width, current.height)
         }
     }
 }
