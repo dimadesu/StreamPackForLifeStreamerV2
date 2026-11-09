@@ -73,6 +73,11 @@ internal class CameraSessionController private constructor(
                     return@withContext
                 }
                 try {
+                    try {
+                        captureSession.abortCaptures()
+                    } catch (t: Throwable) {
+                        Logger.w(TAG, "Error aborting camera captures before close: $t")
+                    }
                     captureSession.close()
                     combine(isClosedFlow, cameraIsClosedFlow) { isClosed, isClosedCamera ->
                         isClosed || isClosedCamera

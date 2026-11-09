@@ -258,6 +258,8 @@ internal class CameraSource(
     override suspend fun release() {
         controller.unmuteVibrationAndSound()
         controller.release()
+        _isStreamingFlow.emit(false)
+        _isPreviewingFlow.emit(false)
     }
 
     private suspend fun executeIfCameraPermission(block: suspend () -> Unit) {

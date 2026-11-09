@@ -133,6 +133,10 @@ internal class CameraController(
     suspend fun removeOutput(name: String) {
         withContext(defaultDispatcher) {
             controllerMutex.withLock {
+                if (isReleased) {
+                    outputs.remove(name)
+                    return@withContext
+                }
                 val needRestart = outputs.remove(name) != null && isActiveFlow.value
                 if (outputs.isEmpty()) {
                     sessionController?.close()
