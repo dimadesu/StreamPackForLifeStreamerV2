@@ -462,17 +462,16 @@ private class DefaultSurfaceProcessor(
         val isPrimary = isPrimaryInput(surfaceTexture)
         if (isPrimary) {
             latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
-        }
-        
-        hasFirstFrame = true
+            hasFirstFrame = true
 
-        if (isTransitioning) {
-            stopTransitionInternal()
-        }
+            if (isTransitioning) {
+                stopTransitionInternal()
+            }
 
-        if (cfrFps == 0 && isPrimary) {
-            // Standard event-driven render
-            renderLatestFrame()
+            if (cfrFps == 0) {
+                // Standard event-driven render
+                renderLatestFrame()
+            }
         }
 
         // Surface, size and transform matrix for JPEG Surface if exists
