@@ -157,6 +157,8 @@ internal class VideoInput(
 
     override var previewSurfaceProvider: IPreviewSurfaceProvider? = null
 
+    private val pipelineOutputSurfaces = mutableListOf<ISurfaceOutput>()
+
     // SOURCE
     private val sourceInternalFlow = MutableStateFlow<IVideoSourceInternal?>(null)
 
@@ -308,6 +310,8 @@ internal class VideoInput(
                         TAG, "Video source configuration is not set"
                     )
 
+                    updateOutputSurfacesUnsafe(newVideoSource.infoProviderFlow.value)
+
                     if (newVideoSource is IPreviewableSource) {
                         try {
                             previewSurfaceProvider?.onPreparePreview(newVideoSource)
@@ -349,8 +353,6 @@ internal class VideoInput(
                             }
                         }
 
-                        updateOutputSurfacesUnsafe(newVideoSource.infoProviderFlow.value)
-
                         try {
                             newVideoSource.startStream()
                         } catch (t: Throwable) {
@@ -360,8 +362,6 @@ internal class VideoInput(
                             )
                             throw t
                         }
-                    } else {
-                        updateOutputSurfacesUnsafe(newVideoSource.infoProviderFlow.value)
                     }
 
                     isStreamingJob += coroutineScope.launch {
@@ -611,15 +611,15 @@ internal class VideoInput(
                 )
                 return
             }
-            addOutputSurfaceUnsafe(
-                buildSurfaceOutput(
-                    infoProvider,
-                    sourceConfig,
-                    surfaceDescriptor = surfaceDescriptor,
-                    isMirroringRequired = isMirroringRequired,
-                    isStreaming = isStreaming
-                )
+            val output = buildSurfaceOutput(
+                infoProvider,
+                sourceConfig,
+                surfaceDescriptor = surfaceDescriptor,
+                isMirroringRequired = isMirroringRequired,
+                isStreaming = isStreaming
             )
+            pipelineOutputSurfaces.add(output)
+            addOutputSurfaceUnsafe(output)
         }
     }
 
@@ -645,15 +645,15 @@ internal class VideoInput(
 
         val surfaces = onUpdateOutputSurface()
         surfaces.forEach { (surfaceDescriptor, isMirroringRequired, isStreaming) ->
-            addOutputSurfaceUnsafe(
-                buildSurfaceOutput(
-                    infoProvider,
-                    videoSourceConfig,
-                    surfaceDescriptor,
-                    isMirroringRequired,
-                    isStreaming
-                )
+            val output = buildSurfaceOutput(
+                infoProvider,
+                videoSourceConfig,
+                surfaceDescriptor,
+                isMirroringRequired,
+                isStreaming
             )
+            pipelineOutputSurfaces.add(output)
+            addOutputSurfaceUnsafe(output)
         }
     }
 
@@ -661,7 +661,10 @@ internal class VideoInput(
         infoProvider: ISourceInfoProvider? = source?.infoProviderFlow?.value,
         videoSourceConfig: VideoSourceConfig? = sourceConfig
     ) {
-        processor.removeAllOutputSurfaces()
+        pipelineOutputSurfaces.forEach {
+            processor.removeOutputSurface(it)
+        }
+        pipelineOutputSurfaces.clear()
         addOutputSurfacesUnsafe(infoProvider, videoSourceConfig)
     }
 
@@ -682,6 +685,7 @@ internal class VideoInput(
     }
 
     internal fun removeOutputSurface(output: Surface) {
+        pipelineOutputSurfaces.removeAll { it.targetSurface == output }
         processor.removeOutputSurface(output)
     }
 
@@ -778,6 +782,7 @@ internal class VideoInput(
                 processor.removeInputSurface(it)
             }
         }
+        pipelineOutputSurfaces.clear()
         processor.removeAllOutputSurfaces()
         processor.release()
     }
