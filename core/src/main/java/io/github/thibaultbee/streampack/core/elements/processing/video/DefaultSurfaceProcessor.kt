@@ -78,6 +78,7 @@ private class DefaultSurfaceProcessor(
     private var transitionIntervalNs: Long = 0L
     private val cfrFrameIntervalNs = if (cfrFps > 0) 1_000_000_000L / cfrFps else 0L
     private var nextFrameTimeNs = 0L
+    private var lastRenderTimestampNs = 0L
     private val transitionTimeoutRunnable = Runnable {
         if (isTransitioning) {
             Logger.w(TAG, "Transition timed out after ${TRANSITION_TIMEOUT_MS}ms, stopping transition loop")
@@ -337,6 +338,7 @@ private class DefaultSurfaceProcessor(
                 isRenderLoopRunning = false
                 glHandler.removeCallbacks(renderRunnable)
                 glHandler.removeCallbacks(transitionTimeoutRunnable)
+                lastRenderTimestampNs = 0L
 
                 checkReadyToRelease()
             }
@@ -491,20 +493,31 @@ private class DefaultSurfaceProcessor(
         }
     }
 
+    private fun getMonotonicRenderTimestampNs(targetTimestampNs: Long): Long {
+        val timestampNs = if (lastRenderTimestampNs == 0L) {
+            targetTimestampNs
+        } else {
+            maxOf(targetTimestampNs, lastRenderTimestampNs + 1_000_000L)
+        }
+        lastRenderTimestampNs = timestampNs
+        return timestampNs
+    }
+
     // Executed on GL thread continuously (CFR/Transition) or onFrameAvailable (Event-driven)
     private fun renderLatestFrame() {
         if (isTransitioning) {
-            renderBlackFrame(System.nanoTime())
+            renderBlackFrame(getMonotonicRenderTimestampNs(System.nanoTime()))
             return
         }
 
         if (!hasFirstFrame || surfaceInputs.isEmpty()) return
 
-        val renderTimestampNs = if (cfrFps > 0) {
+        val rawTimestampNs = if (cfrFps > 0) {
             System.nanoTime()
         } else {
             latestTimestampNs
         }
+        val renderTimestampNs = getMonotonicRenderTimestampNs(rawTimestampNs)
 
         val resolver = inputResolver
         if (resolver == null) {
