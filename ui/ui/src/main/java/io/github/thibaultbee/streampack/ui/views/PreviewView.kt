@@ -59,6 +59,7 @@ import io.github.thibaultbee.streampack.ui.R
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -598,6 +599,7 @@ class PreviewView @JvmOverloads constructor(
     private suspend fun startPreview(
         videoSource: IPreviewableSource, viewfinderBuilder: ViewfinderSurfaceRequest.Builder
     ) {
+        var safetyTimeoutJob: Job? = null
         try {
             Logger.d(TAG, "Starting preview")
             videoSource.previewMutex.withLock {
@@ -628,7 +630,7 @@ class PreviewView @JvmOverloads constructor(
             }
 
             // Fallback safety timeout so cover is never stuck visible if the camera halts
-            val safetyTimeoutJob = defaultScope.launch {
+            safetyTimeoutJob = defaultScope.launch {
                 delay(1500)
                 onFirstFrame()
             }
@@ -644,9 +646,11 @@ class PreviewView @JvmOverloads constructor(
             Logger.d(TAG, "Preview started")
             listener?.onPreviewStarted()
         } catch (e: kotlinx.coroutines.CancellationException) {
+            safetyTimeoutJob?.cancel()
             Logger.d(TAG, "Start preview cancelled")
             throw e
         } catch (t: Throwable) {
+            safetyTimeoutJob?.cancel()
             Logger.e(TAG, "Failed to start preview: $t")
             setCoverVisible(false)
             listener?.onPreviewFailed(t)
