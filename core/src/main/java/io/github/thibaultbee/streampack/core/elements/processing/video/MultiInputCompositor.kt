@@ -16,7 +16,8 @@ internal data class SurfaceInput(
     val surface: Surface,
     val surfaceTexture: SurfaceTexture,
     val textureId: Int,
-    val bufferSize: Size
+    val bufferSize: Size,
+    var hasFrame: Boolean = false
 )
 
 /**
@@ -67,9 +68,9 @@ internal class MultiInputCompositor(private val renderer: OpenGlRenderer) {
         isMuted: Boolean,
         surfaceOutputMatrix: FloatArray
     ) {
-        // Primary first, secondary (drawn on top) last; ignore inputs not owned by the resolver.
+        // Primary first, secondary (drawn on top) last; ignore inputs not owned by the resolver or without a frame yet.
         val orderedInputs = surfaceInputs
-            .filter { resolver.getTargetRect(it.surface) != null }
+            .filter { it.hasFrame && resolver.getTargetRect(it.surface) != null }
             .sortedBy { if (resolver.isSecondaryInput(it.surface)) 1 else 0 }
         if (orderedInputs.isEmpty()) return
 

@@ -457,6 +457,8 @@ private class DefaultSurfaceProcessor(
         surfaceTexture.getTransformMatrix(transform)
         surfaceTexture.getTransformMatrix(textureMatrix)
 
+        surfaceInputs.find { it.surfaceTexture == surfaceTexture }?.hasFrame = true
+
         val isPrimary = isPrimaryInput(surfaceTexture)
         if (isPrimary) {
             latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)

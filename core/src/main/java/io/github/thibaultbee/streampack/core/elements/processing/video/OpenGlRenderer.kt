@@ -392,7 +392,13 @@ class OpenGlRenderer {
         val surfaceWidth = outputSurface.viewPortRect.width()
         val surfaceHeight = outputSurface.viewPortRect.height()
 
+        val hasFullScreenInput = inputs.any { input ->
+            val rect = input.targetRectNorm
+            rect.left == 0f && rect.top == 0f && rect.right == 1f && rect.bottom == 1f
+        }
+
         if (isMuted || inputs.isEmpty()) {
+            GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
             GLES20.glViewport(
                 outputSurface.viewPortRect.left,
                 outputSurface.viewPortRect.top,
@@ -402,6 +408,18 @@ class OpenGlRenderer {
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         } else {
+            if (!hasFullScreenInput) {
+                GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+                GLES20.glViewport(
+                    outputSurface.viewPortRect.left,
+                    outputSurface.viewPortRect.top,
+                    surfaceWidth,
+                    surfaceHeight
+                )
+                GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            }
+
             inputs.forEach { input ->
                 val rect = input.targetRectNorm
                 val isFullScreen = rect.left == 0f && rect.top == 0f && rect.right == 1f && rect.bottom == 1f
