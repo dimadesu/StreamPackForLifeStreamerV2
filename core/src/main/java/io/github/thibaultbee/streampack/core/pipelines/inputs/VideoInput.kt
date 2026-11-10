@@ -626,9 +626,9 @@ internal class VideoInput(
     }
 
     internal fun addOutputSurfaceUnsafe(output: ISurfaceOutput) {
-        pipelineOutputSurfaces.add(output)
         try {
             processor.addOutputSurface(output)
+            pipelineOutputSurfaces.add(output)
         } catch (t: Throwable) {
             Logger.w(TAG, "addOutputSurface: Can't add output surface: ${t.message}")
         }
