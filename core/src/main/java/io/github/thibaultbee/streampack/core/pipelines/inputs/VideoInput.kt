@@ -619,12 +619,12 @@ internal class VideoInput(
                 isMirroringRequired = isMirroringRequired,
                 isStreaming = isStreaming
             )
-            pipelineOutputSurfaces.add(output)
             addOutputSurfaceUnsafe(output)
         }
     }
 
     internal fun addOutputSurfaceUnsafe(output: ISurfaceOutput) {
+        pipelineOutputSurfaces.add(output)
         try {
             processor.addOutputSurface(output)
         } catch (t: Throwable) {
@@ -653,7 +653,6 @@ internal class VideoInput(
                 isMirroringRequired,
                 isStreaming
             )
-            pipelineOutputSurfaces.add(output)
             addOutputSurfaceUnsafe(output)
         }
     }
