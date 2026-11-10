@@ -522,6 +522,37 @@ class PreviewView @JvmOverloads constructor(
     private var lastRequestedRotation: Int? = null
     private var lastRequestedVideoSource: IPreviewableSource? = null
 
+    private fun createViewfinderRequestBuilder(
+        videoSource: IPreviewableSource,
+        size: Size
+    ): ViewfinderSurfaceRequest.Builder? {
+        if (!isAttachedToWindow || display == null) {
+            Logger.d(TAG, "createViewfinderRequestBuilder: view not attached or display null")
+            return null
+        }
+        if (size.height == 0 || size.width == 0) {
+            Logger.w(TAG, "Invalid size: $size")
+            return null
+        }
+        val currentRotation = display.rotation
+        lastRequestedSize = size
+        lastRequestedRotation = currentRotation
+        lastRequestedVideoSource = videoSource
+
+        val previewSize = getPreviewSize(videoSource, size)
+        Logger.i(TAG, "Preparing preview with size ($previewSize) for ($size)")
+        val builder = ViewfinderSurfaceRequest.Builder(previewSize)
+        if (videoSource is ICameraSource && videoSource !is ISurfaceProcessorAwareSource) {
+            val cameraCharacteristics =
+                context.getCameraCharacteristics(videoSource.cameraId)
+            builder.populateFromCharacteristics(cameraCharacteristics)
+        } else {
+            val rotationDegrees = OrientationUtils.getSurfaceRotationDegrees(currentRotation)
+            builder.setSourceOrientation(rotationDegrees)
+        }
+        return builder
+    }
+
     /**
      * Starts the preview for the given [size] and [videoSource].
      */
@@ -529,31 +560,13 @@ class PreviewView @JvmOverloads constructor(
         size: Size,
         videoSource: IPreviewableSource
     ) {
-        if (size.height == 0 || size.width == 0 || display == null) {
-            Logger.w(TAG, "Invalid size: $size")
-            return
-        }
-        val currentRotation = display.rotation
+        val currentRotation = display?.rotation
         if (size == lastRequestedSize && currentRotation == lastRequestedRotation && videoSource == lastRequestedVideoSource) {
             Logger.d(TAG, "Skipping duplicate preview request for $size at rotation $currentRotation")
             return
         }
-        lastRequestedSize = size
-        lastRequestedRotation = currentRotation
-        lastRequestedVideoSource = videoSource
 
-        val previewSize = getPreviewSize(videoSource, size)
-        Logger.i(TAG, "Starting preview with size ($previewSize) for ($size)")
-        val builder = ViewfinderSurfaceRequest.Builder(previewSize)
-        // The concurrent source previews the composited frame, which is already upright.
-        if (videoSource is ICameraSource && videoSource !is ISurfaceProcessorAwareSource) {
-            val cameraCharacteristics =
-                context.getCameraCharacteristics(videoSource.cameraId)
-            builder.populateFromCharacteristics(cameraCharacteristics)
-        } else {
-            val rotationDegrees = OrientationUtils.getSurfaceRotationDegrees(display.rotation)
-            builder.setSourceOrientation(rotationDegrees)
-        }
+        val builder = createViewfinderRequestBuilder(videoSource, size) ?: return
         startPreviewJob += defaultScope.launch {
             startPreview(videoSource, builder)
         }
@@ -565,31 +578,7 @@ class PreviewView @JvmOverloads constructor(
 
     override suspend fun onPreparePreview(videoSource: IPreviewableSource) {
         val builder = withContext(mainDispatcher) {
-            if (!isAttachedToWindow || display == null) {
-                Logger.d(TAG, "onPreparePreview: view not attached or display null")
-                return@withContext null
-            }
-            val currentSize = size
-            if (currentSize.width == 0 || currentSize.height == 0) {
-                Logger.d(TAG, "onPreparePreview: view size is 0")
-                return@withContext null
-            }
-            val currentRotation = display.rotation
-            val previewSize = getPreviewSize(videoSource, currentSize)
-            Logger.i(TAG, "onPreparePreview: Preparing preview with size ($previewSize) for ($currentSize)")
-            val builder = ViewfinderSurfaceRequest.Builder(previewSize)
-            if (videoSource is ICameraSource && videoSource !is ISurfaceProcessorAwareSource) {
-                val cameraCharacteristics =
-                    context.getCameraCharacteristics(videoSource.cameraId)
-                builder.populateFromCharacteristics(cameraCharacteristics)
-            } else {
-                val rotationDegrees = OrientationUtils.getSurfaceRotationDegrees(currentRotation)
-                builder.setSourceOrientation(rotationDegrees)
-            }
-            lastRequestedSize = currentSize
-            lastRequestedRotation = currentRotation
-            lastRequestedVideoSource = videoSource
-            builder
+            createViewfinderRequestBuilder(videoSource, size)
         } ?: return
 
         startPreviewJob.cancel()
