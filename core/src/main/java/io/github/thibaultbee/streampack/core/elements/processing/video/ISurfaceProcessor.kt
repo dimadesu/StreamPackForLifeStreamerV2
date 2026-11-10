@@ -81,6 +81,16 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
 
     fun removeAllOutputSurfaces()
 
+    /**
+     * Starts rendering black transition frames at the specified [fps] to streaming outputs.
+     * Used during video source switching to prevent frozen frames on the stream.
+     */
+    fun startTransition(fps: Int = 30) {}
+
+    /**
+     * Stops the transition black frame loop.
+     */
+    fun stopTransition() {}
 }
 
 /**

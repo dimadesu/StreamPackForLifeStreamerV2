@@ -225,180 +225,205 @@ internal class VideoInput(
                     )
                 }
 
-                val wasReleasedEarly = previousVideoSource != null && (
-                        previousVideoSource is ISurfaceProcessorAwareSource ||
-                        videoSourceFactory is ISurfaceProcessorAwareSource.Factory ||
-                        (previousVideoSource is CameraSource && videoSourceFactory is CameraSourceFactory)
-                    )
-                if (wasReleasedEarly) {
-                    /**
-                     * It is not possible to have 2 camera sources at the same time because of
-                     * camera2 API. If the new video source is a camera source and the current one
-                     * is a camera source, we release the current one ASAP.
-                     *
-                     * Release the source before resetting its output so CameraController aborts
-                     * and closes the capture session immediately instead of submitting a new
-                     * repeating request (via stopStream) or recreating a preview-only session
-                     * (via resetOutput).
-                     */
-                    val previousSurface = (previousVideoSource as? ISurfaceSourceInternal)?.let {
-                        try {
-                            it.getOutput()
-                        } catch (t: Throwable) {
-                            Logger.w(
-                                TAG,
-                                "setVideoSource: Can't get previous video source output: ${t.message}"
-                            )
-                            null
-                        }
-                    }
+                if (isStreaming) {
                     try {
-                        previousVideoSource.release()
+                        processor.startTransition(sourceConfig?.fps ?: 30)
                     } catch (t: Throwable) {
                         Logger.w(
                             TAG,
-                            "setVideoSource: Can't release previous video source: ${t.message}"
+                            "setVideoSource: Failed to start processor transition: ${t.message}"
                         )
                     }
-                    if (previousVideoSource is ISurfaceSourceInternal) {
-                        try {
-                            previousVideoSource.resetOutput()
-                        } catch (t: Throwable) {
-                            Logger.w(
-                                TAG,
-                                "setVideoSource: Can't reset previous video source output: ${t.message}"
-                            )
-                        }
-                        previousSurface?.let {
+                }
+
+                try {
+                    val wasReleasedEarly = previousVideoSource != null && (
+                            previousVideoSource is ISurfaceProcessorAwareSource ||
+                            videoSourceFactory is ISurfaceProcessorAwareSource.Factory ||
+                            (previousVideoSource is CameraSource && videoSourceFactory is CameraSourceFactory)
+                        )
+                    if (wasReleasedEarly) {
+                        /**
+                         * It is not possible to have 2 camera sources at the same time because of
+                         * camera2 API. If the new video source is a camera source and the current one
+                         * is a camera source, we release the current one ASAP.
+                         *
+                         * Release the source before resetting its output so CameraController aborts
+                         * and closes the capture session immediately instead of submitting a new
+                         * repeating request (via stopStream) or recreating a preview-only session
+                         * (via resetOutput).
+                         */
+                        val previousSurface = (previousVideoSource as? ISurfaceSourceInternal)?.let {
                             try {
-                                processor.removeInputSurface(it)
+                                it.getOutput()
                             } catch (t: Throwable) {
                                 Logger.w(
                                     TAG,
-                                    "setVideoSource: Can't remove previous input surface: ${t.message}"
+                                    "setVideoSource: Can't get previous video source output: ${t.message}"
+                                )
+                                null
+                            }
+                        }
+                        try {
+                            previousVideoSource.release()
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Can't release previous video source: ${t.message}"
+                            )
+                        }
+                        if (previousVideoSource is ISurfaceSourceInternal) {
+                            try {
+                                previousVideoSource.resetOutput()
+                            } catch (t: Throwable) {
+                                Logger.w(
+                                    TAG,
+                                    "setVideoSource: Can't reset previous video source output: ${t.message}"
+                                )
+                            }
+                            previousSurface?.let {
+                                try {
+                                    processor.removeInputSurface(it)
+                                } catch (t: Throwable) {
+                                    Logger.w(
+                                        TAG,
+                                        "setVideoSource: Can't remove previous input surface: ${t.message}"
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Prepare new video source
+                    val newVideoSource = videoSourceFactory.create(context, dispatcherProvider)
+
+                    sourceConfig?.let {
+                        newVideoSource.configure(it)
+                        addSourceSurface(
+                            it,
+                            processor,
+                            newVideoSource
+                        )
+                    } ?: Logger.w(
+                        TAG, "Video source configuration is not set"
+                    )
+
+                    if (newVideoSource is IPreviewableSource) {
+                        try {
+                            previewSurfaceProvider?.onPreparePreview(newVideoSource)
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Failed to prepare preview on new video source: ${t.message}"
+                            )
+                        }
+                    }
+
+                    infoProviderJob += coroutineScope.launch {
+                        /**
+                         * First emission is the current value, we skip it.
+                         */
+                        newVideoSource.infoProviderFlow.drop(1).collect { infoProvider ->
+                            try {
+                                updateOutputSurfaces(infoProvider)
+                            } catch (t: Throwable) {
+                                Logger.w(
+                                    TAG,
+                                    "setVideoSource: Can't update output surfaces after info provider changed: ${t.message}"
                                 )
                             }
                         }
                     }
-                }
 
-                // Prepare new video source
-                val newVideoSource = videoSourceFactory.create(context, dispatcherProvider)
-
-                sourceConfig?.let {
-                    newVideoSource.configure(it)
-                    addSourceSurface(
-                        it,
-                        processor,
-                        newVideoSource
-                    )
-                } ?: Logger.w(
-                    TAG, "Video source configuration is not set"
-                )
-
-                if (newVideoSource is IPreviewableSource) {
-                    try {
-                        previewSurfaceProvider?.onPreparePreview(newVideoSource)
-                    } catch (t: Throwable) {
-                        Logger.w(
-                            TAG,
-                            "setVideoSource: Failed to prepare preview on new video source: ${t.message}"
-                        )
-                    }
-                }
-
-                infoProviderJob += coroutineScope.launch {
-                    /**
-                     * First emission is the current value, we skip it.
-                     */
-                    newVideoSource.infoProviderFlow.drop(1).collect { infoProvider ->
-                        try {
-                            updateOutputSurfaces(infoProvider)
-                        } catch (t: Throwable) {
-                            Logger.w(
-                                TAG,
-                                "setVideoSource: Can't update output surfaces after info provider changed: ${t.message}"
-                            )
-                        }
-                    }
-                }
-
-                // Start new video source
-                if (isStreaming) {
-                    Logger.e(TAG, "Starting new video source streaming")
-                    if (!wasReleasedEarly) {
-                        try {
-                            previousVideoSource.stopStream()
-                        } catch (t: Throwable) {
-                            Logger.w(
-                                TAG,
-                                "setVideoSource: Can't stop previous video source: ${t.message}"
-                            )
-                        }
-                    }
-
-                    updateOutputSurfacesUnsafe(newVideoSource.infoProviderFlow.value)
-
-                    try {
-                        newVideoSource.startStream()
-                    } catch (t: Throwable) {
-                        Logger.w(
-                            TAG,
-                            "setVideoSource: Can't start new video source: ${t.message}."
-                        )
-                        throw t
-                    }
-                } else {
-                    updateOutputSurfacesUnsafe(newVideoSource.infoProviderFlow.value)
-                }
-
-                isStreamingJob += coroutineScope.launch {
-                    newVideoSource.isStreamingFlow.collect { isStreaming ->
-                        if ((!isStreaming) && isStreamingFlow.value) {
-                            Logger.i(TAG, "Video source has been stopped.")
+                    // Start new video source
+                    if (isStreaming) {
+                        Logger.e(TAG, "Starting new video source streaming")
+                        if (!wasReleasedEarly) {
                             try {
-                                stopStream()
-                            } catch (_: Throwable) {
-                                // Nothing to do, input might be already released
+                                previousVideoSource.stopStream()
+                            } catch (t: Throwable) {
+                                Logger.w(
+                                    TAG,
+                                    "setVideoSource: Can't stop previous video source: ${t.message}"
+                                )
+                            }
+                        }
+
+                        updateOutputSurfacesUnsafe(newVideoSource.infoProviderFlow.value)
+
+                        try {
+                            newVideoSource.startStream()
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Can't start new video source: ${t.message}."
+                            )
+                            throw t
+                        }
+                    } else {
+                        updateOutputSurfacesUnsafe(newVideoSource.infoProviderFlow.value)
+                    }
+
+                    isStreamingJob += coroutineScope.launch {
+                        newVideoSource.isStreamingFlow.collect { isStreaming ->
+                            if ((!isStreaming) && isStreamingFlow.value) {
+                                Logger.i(TAG, "Video source has been stopped.")
+                                try {
+                                    stopStream()
+                                } catch (_: Throwable) {
+                                    // Nothing to do, input might be already released
+                                }
                             }
                         }
                     }
-                }
 
-                // Gets and resets output surface from previous video source if not already handled.
-                if (!wasReleasedEarly && previousVideoSource is ISurfaceSourceInternal) {
-                    try {
-                        val surface = previousVideoSource.getOutput()
-                        previousVideoSource.resetOutput()
-                        surface?.let { processor.removeInputSurface(surface) }
-                    } catch (t: Throwable) {
-                        Logger.w(
-                            TAG,
-                            "setVideoSource: Can't reset previous video source output surface: ${t.message}"
-                        )
+                    // Gets and resets output surface from previous video source if not already handled.
+                    if (!wasReleasedEarly && previousVideoSource is ISurfaceSourceInternal) {
+                        try {
+                            val surface = previousVideoSource.getOutput()
+                            previousVideoSource.resetOutput()
+                            surface?.let { processor.removeInputSurface(surface) }
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Can't reset previous video source output surface: ${t.message}"
+                            )
+                        }
                     }
-                }
 
-                val isPreviewing =
-                    (previousVideoSource as? IPreviewableSource)?.isPreviewingFlow?.value
-                        ?: false
-                /**
-                 * Release previous video source only if it's not previewing.
-                 * If it's previewing, it will be released when preview is stopped.
-                 */
-                if (!wasReleasedEarly && !isPreviewing) {
-                    try {
-                        previousVideoSource?.release()
-                    } catch (t: Throwable) {
-                        Logger.w(
-                            TAG,
-                            "setVideoSource: Can't release previous video source: ${t.message}"
-                        )
+                    val isPreviewing =
+                        (previousVideoSource as? IPreviewableSource)?.isPreviewingFlow?.value
+                            ?: false
+                    /**
+                     * Release previous video source only if it's not previewing.
+                     * If it's previewing, it will be released when preview is stopped.
+                     */
+                    if (!wasReleasedEarly && !isPreviewing) {
+                        try {
+                            previousVideoSource?.release()
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Can't release previous video source: ${t.message}"
+                            )
+                        }
                     }
-                }
 
-                // Replace video source
-                sourceInternalFlow.emit(newVideoSource)
+                    // Replace video source
+                    sourceInternalFlow.emit(newVideoSource)
+                } catch (t: Throwable) {
+                    if (isStreaming) {
+                        try {
+                            processor.stopTransition()
+                        } catch (stopErr: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Failed to stop processor transition on error: ${stopErr.message}"
+                            )
+                        }
+                    }
+                    throw t
+                }
             }
         }
     }
@@ -738,6 +763,9 @@ internal class VideoInput(
                     return@withContext
                 }
                 _isStreamingFlow.emit(false)
+                try {
+                    processor.stopTransition()
+                } catch (_: Throwable) {}
                 stopStreamUnsafe()
             }
         }

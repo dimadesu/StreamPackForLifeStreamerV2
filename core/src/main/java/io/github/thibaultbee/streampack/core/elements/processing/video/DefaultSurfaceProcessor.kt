@@ -70,34 +70,51 @@ private class DefaultSurfaceProcessor(
         hashMapOf()
     private val surfaceInputsToMatrixMap: MutableMap<SurfaceTexture, FloatArray> = hashMapOf()
 
-    // CFR Render loop state
+    // CFR & Transition Render loop state
     @Volatile private var latestTimestampNs: Long = 0L
     @Volatile private var hasFirstFrame: Boolean = false
     private var isRenderLoopRunning = false
+    @Volatile private var isTransitioning: Boolean = false
+    private var transitionIntervalNs: Long = 0L
     private val cfrFrameIntervalNs = if (cfrFps > 0) 1_000_000_000L / cfrFps else 0L
-    private var nextCfrFrameTimeNs = 0L
+    private var nextFrameTimeNs = 0L
+    private val transitionTimeoutRunnable = Runnable {
+        if (isTransitioning) {
+            Logger.w(TAG, "Transition timed out after ${TRANSITION_TIMEOUT_MS}ms, stopping transition loop")
+            stopTransitionInternal()
+        }
+    }
     private val renderRunnable = object : Runnable {
         override fun run() {
             if (isReleaseRequested.get() || isReleased) return
-            if (cfrFps <= 0 || cfrFrameIntervalNs <= 0L) {
-                renderLatestFrame()
+
+            val intervalNs = if (isTransitioning) {
+                transitionIntervalNs
+            } else if (cfrFps > 0) {
+                cfrFrameIntervalNs
+            } else {
+                0L
+            }
+
+            if (intervalNs <= 0L) {
+                isRenderLoopRunning = false
                 return
             }
 
             val nowNs = System.nanoTime()
-            if (nextCfrFrameTimeNs == 0L) {
-                nextCfrFrameTimeNs = nowNs
+            if (nextFrameTimeNs == 0L) {
+                nextFrameTimeNs = nowNs
             }
 
-            if (nowNs >= nextCfrFrameTimeNs) {
+            if (nowNs >= nextFrameTimeNs) {
                 renderLatestFrame()
                 // Skip missed slots so a slow render doesn't burst later.
                 do {
-                    nextCfrFrameTimeNs += cfrFrameIntervalNs
-                } while (nextCfrFrameTimeNs <= nowNs)
+                    nextFrameTimeNs += intervalNs
+                } while (nextFrameTimeNs <= nowNs)
             }
 
-            val delayMs = ((nextCfrFrameTimeNs - System.nanoTime() + 999_999L) / 1_000_000L)
+            val delayMs = ((nextFrameTimeNs - System.nanoTime() + 999_999L) / 1_000_000L)
                 .coerceAtLeast(0L)
             glHandler.postDelayed(this, delayMs)
         }
@@ -167,7 +184,7 @@ private class DefaultSurfaceProcessor(
         executeSafely {
             if (cfrFps > 0 && !isRenderLoopRunning) {
                 isRenderLoopRunning = true
-                nextCfrFrameTimeNs = 0L
+                nextFrameTimeNs = 0L
                 glHandler.post(renderRunnable)
                 Logger.i(TAG, "Started CFR render loop at $cfrFps fps")
             }
@@ -197,7 +214,7 @@ private class DefaultSurfaceProcessor(
                 surfaceInputsToMatrixMap.remove(surfaceTexture)
                 surfaceInputs.remove(surfaceInput)
 
-                if (surfaceInputs.isEmpty() && isRenderLoopRunning) {
+                if (surfaceInputs.isEmpty() && isRenderLoopRunning && !isTransitioning) {
                     isRenderLoopRunning = false
                     glHandler.removeCallbacks(renderRunnable)
                 }
@@ -316,9 +333,10 @@ private class DefaultSurfaceProcessor(
         executeSafely(block = {
             if (!isReleased) {
                 isReleased = true
-                
+                isTransitioning = false
                 isRenderLoopRunning = false
                 glHandler.removeCallbacks(renderRunnable)
+                glHandler.removeCallbacks(transitionTimeoutRunnable)
 
                 checkReadyToRelease()
             }
@@ -332,6 +350,48 @@ private class DefaultSurfaceProcessor(
 
             renderer.release()
             glThread.quit()
+        }
+    }
+
+    override fun startTransition(fps: Int) {
+        if (isReleaseRequested.get()) return
+        executeSafely {
+            if (isReleaseRequested.get() || isReleased) return@executeSafely
+            val targetFps = if (fps > 0) fps else 30
+            transitionIntervalNs = 1_000_000_000L / targetFps
+            isTransitioning = true
+            hasFirstFrame = false
+            nextFrameTimeNs = 0L
+
+            glHandler.removeCallbacks(transitionTimeoutRunnable)
+            glHandler.postDelayed(transitionTimeoutRunnable, TRANSITION_TIMEOUT_MS)
+
+            if (!isRenderLoopRunning) {
+                isRenderLoopRunning = true
+                glHandler.post(renderRunnable)
+                Logger.i(TAG, "Started transition black frame loop at $targetFps fps")
+            }
+        }
+    }
+
+    override fun stopTransition() {
+        if (isReleaseRequested.get()) return
+        executeSafely {
+            if (isReleaseRequested.get() || isReleased) return@executeSafely
+            stopTransitionInternal()
+        }
+    }
+
+    private fun stopTransitionInternal() {
+        glHandler.removeCallbacks(transitionTimeoutRunnable)
+        if (isTransitioning) {
+            isTransitioning = false
+            nextFrameTimeNs = 0L
+            Logger.i(TAG, "Stopped transition black frame loop")
+            if (cfrFps <= 0 && isRenderLoopRunning) {
+                isRenderLoopRunning = false
+                glHandler.removeCallbacks(renderRunnable)
+            }
         }
     }
 
@@ -404,6 +464,10 @@ private class DefaultSurfaceProcessor(
         
         hasFirstFrame = true
 
+        if (isTransitioning) {
+            stopTransitionInternal()
+        }
+
         if (cfrFps == 0 && isPrimary) {
             // Standard event-driven render
             renderLatestFrame()
@@ -427,8 +491,13 @@ private class DefaultSurfaceProcessor(
         }
     }
 
-    // Executed on GL thread continuously (CFR) or onFrameAvailable (Event-driven)
+    // Executed on GL thread continuously (CFR/Transition) or onFrameAvailable (Event-driven)
     private fun renderLatestFrame() {
+        if (isTransitioning) {
+            renderBlackFrame(System.nanoTime())
+            return
+        }
+
         if (!hasFirstFrame || surfaceInputs.isEmpty()) return
 
         val renderTimestampNs = if (cfrFps > 0) {
@@ -450,6 +519,23 @@ private class DefaultSurfaceProcessor(
                 isMuted,
                 surfaceOutputMatrix
             )
+        }
+    }
+
+    private fun renderBlackFrame(renderTimestampNs: Long) {
+        surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach {
+            try {
+                if (it.isStreaming()) {
+                    renderer.render(
+                        renderTimestampNs,
+                        surfaceOutputMatrix,
+                        it.targetSurface,
+                        isMuted = true
+                    )
+                }
+            } catch (t: Throwable) {
+                Logger.e(TAG, "Error while rendering black transition frame", t)
+            }
         }
     }
 
@@ -567,6 +653,7 @@ private class DefaultSurfaceProcessor(
 
     companion object {
         private const val TAG = "SurfaceProcessor"
+        private const val TRANSITION_TIMEOUT_MS = 3000L
     }
 
     private data class PendingSnapshot(
