@@ -199,47 +199,49 @@ internal class VideoInput(
         }
 
         withContext(dispatcherProvider.default) {
-            sourceMutex.withLock {
-                if (isReleaseRequested.get()) {
-                    throw IllegalStateException("Input is released")
-                }
-                val previousVideoSource = sourceInternalFlow.value
-                val isStreaming = previousVideoSource?.isStreamingFlow?.value ?: false
-
-                if (videoSourceFactory.isSourceEquals(previousVideoSource)) {
-                    Logger.i(TAG, "Video source is already set, skipping")
-                    return@withContext
-                }
-
-                sourceConfig?.let {
-                    require(videoSourceFactory.isConfigurationSupported(context, it)) {
-                        "Video source $videoSourceFactory does not support configuration: $it"
+            var transitionStarted = false
+            try {
+                sourceMutex.withLock {
+                    if (isReleaseRequested.get()) {
+                        throw IllegalStateException("Input is released")
                     }
-                }
+                    val previousVideoSource = sourceInternalFlow.value
+                    val isStreaming = previousVideoSource?.isStreamingFlow?.value ?: false
 
-                isStreamingJob.cancel()
+                    if (videoSourceFactory.isSourceEquals(previousVideoSource)) {
+                        Logger.i(TAG, "Video source is already set, skipping")
+                        return@withContext
+                    }
 
-                try {
-                    previewSurfaceProvider?.onSourceSwitchingStart(previousVideoSource)
-                } catch (t: Throwable) {
-                    Logger.w(
-                        TAG,
-                        "setVideoSource: Failed to notify preview provider of switch start: ${t.message}"
-                    )
-                }
+                    sourceConfig?.let {
+                        require(videoSourceFactory.isConfigurationSupported(context, it)) {
+                            "Video source $videoSourceFactory does not support configuration: $it"
+                        }
+                    }
 
-                if (isStreaming) {
+                    isStreamingJob.cancel()
+
                     try {
-                        processor.startTransition(sourceConfig?.fps ?: 30)
+                        previewSurfaceProvider?.onSourceSwitchingStart(previousVideoSource)
                     } catch (t: Throwable) {
                         Logger.w(
                             TAG,
-                            "setVideoSource: Failed to start processor transition: ${t.message}"
+                            "setVideoSource: Failed to notify preview provider of switch start: ${t.message}"
                         )
                     }
-                }
 
-                try {
+                    if (isStreaming) {
+                        try {
+                            processor.startTransition(sourceConfig?.fps ?: 30)
+                            transitionStarted = true
+                        } catch (t: Throwable) {
+                            Logger.w(
+                                TAG,
+                                "setVideoSource: Failed to start processor transition: ${t.message}"
+                            )
+                        }
+                    }
+
                     val wasReleasedEarly = previousVideoSource != null && (
                             previousVideoSource is ISurfaceProcessorAwareSource ||
                             videoSourceFactory is ISurfaceProcessorAwareSource.Factory ||
@@ -412,19 +414,19 @@ internal class VideoInput(
 
                     // Replace video source
                     sourceInternalFlow.emit(newVideoSource)
-                } catch (t: Throwable) {
-                    if (isStreaming) {
-                        try {
-                            processor.stopTransition()
-                        } catch (stopErr: Throwable) {
-                            Logger.w(
-                                TAG,
-                                "setVideoSource: Failed to stop processor transition on error: ${stopErr.message}"
-                            )
-                        }
-                    }
-                    throw t
                 }
+            } catch (t: Throwable) {
+                if (transitionStarted) {
+                    try {
+                        processor.stopTransition()
+                    } catch (stopErr: Throwable) {
+                        Logger.w(
+                            TAG,
+                            "setVideoSource: Failed to stop processor transition on error: ${stopErr.message}"
+                        )
+                    }
+                }
+                throw t
             }
         }
     }
