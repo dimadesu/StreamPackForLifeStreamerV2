@@ -27,10 +27,9 @@ import android.view.Surface
 import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import io.github.thibaultbee.streampack.core.elements.processing.video.ISurfaceProcessorInternal
-import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
-import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.sources.video.AbstractPreviewableSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProcessorAwareSource
+import io.github.thibaultbee.streampack.core.elements.sources.video.SurfaceProcessorPreviewHelper
 import io.github.thibaultbee.streampack.core.elements.sources.video.VideoSourceConfig
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.controllers.CameraController
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.cameraManager
@@ -41,8 +40,6 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CameraSurface
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CaptureRequestWithTargetsBuilder
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CaptureResultListener
-import io.github.thibaultbee.streampack.core.elements.utils.extensions.displayRotation
-import io.github.thibaultbee.streampack.core.elements.utils.extensions.rotate
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.logger.Logger
 import io.github.thibaultbee.streampack.core.utils.InternalStreamPackApi
@@ -53,8 +50,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlin.math.abs
-import kotlin.math.roundToInt
 import kotlin.reflect.KMutableProperty0
 
 /**
@@ -109,14 +104,17 @@ internal class CameraSource(
     private val _isPreviewingFlow = MutableStateFlow(false)
     override val isPreviewingFlow = _isPreviewingFlow.asStateFlow()
 
-    private val previewLock = Any()
-    private var surfaceProcessor: ISurfaceProcessorInternal? = null
-    private var previewSurface: Surface? = null
-    private var previewSize: Size? = null
-    private var previewAttachment: PreviewAttachment? = null
-
     @Volatile
     private var savedConfig: VideoSourceConfig? = null
+
+    private val previewHelper = SurfaceProcessorPreviewHelper(
+        context = context,
+        infoProvider = { infoProviderFlow.value },
+        isStreaming = { _isPreviewingFlow.value },
+        configuredInputSize = {
+            savedConfig?.let { infoProviderFlow.value.getSurfaceSize(it.resolution) }
+        }
+    )
 
     // Protected by streamMutex
     private var isStreamRequested = false
@@ -165,82 +163,7 @@ internal class CameraSource(
     }
 
     override fun setSurfaceProcessor(processor: ISurfaceProcessorInternal) {
-        synchronized(previewLock) {
-            surfaceProcessor = processor
-            attachPreviewOutputLocked()
-        }
-    }
-
-    private fun detachPreviewOutputLocked() {
-        previewAttachment?.let { (processor, output, _) ->
-            try {
-                processor.removeOutputSurface(output)
-            } catch (t: Throwable) {
-                Logger.w(TAG, "Failed to detach preview output: ${t.message}")
-            }
-        }
-        previewAttachment = null
-    }
-
-    private fun attachPreviewOutputLocked() {
-        val processor = surfaceProcessor ?: return
-        val surface = previewSurface ?: return
-        val size = previewSize ?: return
-
-        val rotation = context.displayRotation
-        val baseProvider = infoProviderFlow.value
-        val effectiveInputSize = getConfiguredInputSize()
-            ?: size.rotate(baseProvider.getRelativeRotationDegrees(rotation, false))
-
-        if (previewAttachment?.matches(
-                processor,
-                surface,
-                size,
-                rotation,
-                effectiveInputSize
-            ) == true
-        ) {
-            return
-        }
-
-        detachPreviewOutputLocked()
-        try {
-            // Keep source size aligned with the actual camera buffer (or rotated preview size
-            // before configure) so SurfaceOutput preserves aspect ratio without area-only lookup.
-            val previewInfoProvider = object : ISourceInfoProvider by baseProvider {
-                override fun getSurfaceSize(targetResolution: Size) = effectiveInputSize
-            }
-            val output = SurfaceOutput(
-                targetSurface = surface,
-                targetResolution = size,
-                targetRotation = rotation,
-                isStreaming = { _isPreviewingFlow.value },
-                sourceResolution = effectiveInputSize,
-                // Mirror front camera for selfie preview only; the encoded stream stays unmirrored.
-                needMirroring = baseProvider.isMirror,
-                sourceInfoProvider = previewInfoProvider
-            )
-            processor.addOutputSurface(output)
-            previewAttachment = PreviewAttachment(processor, output, effectiveInputSize)
-        } catch (t: Throwable) {
-            Logger.w(TAG, "Failed to attach preview output: ${t.message}")
-        }
-    }
-
-    private fun getConfiguredInputSize(): Size? =
-        savedConfig?.let { infoProviderFlow.value.getSurfaceSize(it.resolution) }
-
-    private fun getUprightSize(bufferSize: Size): Size =
-        bufferSize.rotate(
-            infoProviderFlow.value.getRelativeRotationDegrees(context.displayRotation, false)
-        )
-
-    private inline fun computePreviewSize(
-        targetSize: Size? = null,
-        fallbackBufferSize: () -> Size? = { null }
-    ): Size? {
-        val sourceBufferSize = getConfiguredInputSize() ?: fallbackBufferSize() ?: return null
-        return scalePreviewSize(getUprightSize(sourceBufferSize), targetSize)
+        previewHelper.setSurfaceProcessor(processor)
     }
 
     /**
@@ -249,38 +172,7 @@ internal class CameraSource(
      * resolution aspect ratio changed. The preview surface must then be re-requested so its
      * buffer gets a matching size; otherwise the preview is letterboxed inside it.
      */
-    override fun needsPreviewRefresh(): Boolean {
-        synchronized(previewLock) {
-            if (previewSurface == null) return false
-            val size = previewSize ?: return false
-            val inputSize = getConfiguredInputSize() ?: return false
-            return !hasSameAspectRatio(size, getUprightSize(inputSize))
-        }
-    }
-
-    private fun hasSameAspectRatio(a: Size, b: Size): Boolean {
-        val ratioA = a.width.toFloat() / a.height
-        val ratioB = b.width.toFloat() / b.height
-        // Tolerance absorbs the even-pixel rounding done in scalePreviewSize.
-        return abs(ratioA - ratioB) <= ASPECT_RATIO_TOLERANCE * ratioB
-    }
-
-    private fun scalePreviewSize(uprightSize: Size, targetSize: Size? = null): Size {
-        val capScale = MAX_PREVIEW_DIMENSION.toFloat() / maxOf(uprightSize.width, uprightSize.height)
-        val scale = if (targetSize != null && targetSize.width > 0 && targetSize.height > 0) {
-            val viewScale = maxOf(
-                targetSize.width.toFloat() / uprightSize.width,
-                targetSize.height.toFloat() / uprightSize.height
-            )
-            minOf(1f, capScale, viewScale)
-        } else {
-            minOf(1f, capScale)
-        }
-        return Size(
-            (uprightSize.width * scale).roundToInt().coerceAtLeast(2) and 1.inv(),
-            (uprightSize.height * scale).roundToInt().coerceAtLeast(2) and 1.inv()
-        )
-    }
+    override fun needsPreviewRefresh(): Boolean = previewHelper.needsPreviewRefresh()
 
     @RequiresPermission(Manifest.permission.CAMERA)
     private suspend fun syncStreamTargetUnsafe() {
@@ -297,9 +189,7 @@ internal class CameraSource(
     }
 
     override suspend fun hasPreview() = withContext(defaultDispatcher) {
-        synchronized(previewLock) {
-            previewSurface != null
-        }
+        previewHelper.hasPreview()
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
@@ -308,23 +198,14 @@ internal class CameraSource(
             if (isPreviewingFlow.value) {
                 Logger.w(TAG, "Trying to set preview while previewing")
             }
-            synchronized(previewLock) {
-                previewSurface = surface
-                if (previewSize == null) {
-                    previewSize = computePreviewSize()
-                }
-                attachPreviewOutputLocked()
-            }
+            previewHelper.setPreview(surface)
         }
     }
 
     @SuppressLint("MissingPermission")
     override suspend fun resetPreviewImpl() {
         withContext(defaultDispatcher) {
-            synchronized(previewLock) {
-                detachPreviewOutputLocked()
-                previewSurface = null
-            }
+            previewHelper.resetPreview()
         }
     }
 
@@ -347,9 +228,7 @@ internal class CameraSource(
     override suspend fun resetOutputImpl() = withContext(defaultDispatcher) {
         // Keep previewSurface intact so StreamPack's resolution reconfiguration
         // (resetOutput -> configure -> setSurfaceProcessor -> setOutput) re-attaches it.
-        synchronized(previewLock) {
-            detachPreviewOutputLocked()
-        }
+        previewHelper.detachOutput()
         streamMutex.withLock {
             isExpectingSessionClose = controller.isActiveFlow.value
             executeIfCameraPermission {
@@ -376,23 +255,15 @@ internal class CameraSource(
         } catch (t: Throwable) {
             Logger.w(TAG, "Failed to set fps: ${t.message}")
         }
-        synchronized(previewLock) {
-            // Only refresh an attached output; after resetOutput, setSurfaceProcessor re-attaches.
-            if (previewAttachment != null) {
-                attachPreviewOutputLocked()
-            }
-        }
+        // Only refresh an attached output; after resetOutput, setSurfaceProcessor re-attaches.
+        previewHelper.refreshIfAttached()
     }
 
 
     override fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size {
-        val selectedSize = computePreviewSize(targetSize) {
+        return previewHelper.selectUprightPreviewSize(targetSize) {
             CameraSizes.getPreviewOutputSize(characteristics, targetSize, targetClass)
         }!!
-        synchronized(previewLock) {
-            previewSize = selectedSize
-        }
-        return selectedSize
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
@@ -473,12 +344,7 @@ internal class CameraSource(
         }
 
     override suspend fun release() {
-        synchronized(previewLock) {
-            detachPreviewOutputLocked()
-            surfaceProcessor = null
-            previewSurface = null
-            previewSize = null
-        }
+        previewHelper.release()
         streamMutex.withLock {
             isStreamRequested = false
             isPreviewRequested = false
@@ -504,29 +370,9 @@ internal class CameraSource(
         return "CameraSource(id=$cameraId)"
     }
 
-    private data class PreviewAttachment(
-        val processor: ISurfaceProcessorInternal,
-        val output: SurfaceOutput,
-        val inputSize: Size
-    ) {
-        fun matches(
-            processor: ISurfaceProcessorInternal,
-            surface: Surface,
-            size: Size,
-            rotation: Int,
-            inputSize: Size
-        ) = this.processor === processor &&
-            output.targetSurface === surface &&
-            output.targetResolution == size &&
-            output.targetRotation == rotation &&
-            this.inputSize == inputSize
-    }
-
     companion object {
         private const val TAG = "CameraSource"
 
         private const val STREAM_NAME = "stream"
-        private const val MAX_PREVIEW_DIMENSION = 1920
-        private const val ASPECT_RATIO_TOLERANCE = 0.01f
     }
 }
