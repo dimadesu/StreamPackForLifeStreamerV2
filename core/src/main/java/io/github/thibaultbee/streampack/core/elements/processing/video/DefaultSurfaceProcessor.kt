@@ -63,6 +63,7 @@ private class DefaultSurfaceProcessor(
 
     private val textureMatrix = FloatArray(16)
     private val surfaceOutputMatrix = FloatArray(16)
+    private val singleInputOutputMatrix = FloatArray(16)
 
     private val surfaceOutputs: MutableList<ISurfaceOutput> = mutableListOf()
     private val surfaceInputs: MutableList<SurfaceInput> = mutableListOf()
@@ -477,11 +478,10 @@ private class DefaultSurfaceProcessor(
         // Surface, size and transform matrix for JPEG Surface if exists
         if (pendingSnapshots.isNotEmpty() && isPrimary) {
             try {
-                val bitmapSurface =
-                    surfaceOutputs.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
-                        ?: throw IllegalStateException(
-                            "No output surface available for snapshot"
-                        )
+                val bitmapSurface = selectSnapshotSurface(surfaceOutputs)
+                    ?: throw IllegalStateException(
+                        "No output surface available for snapshot"
+                    )
 
                 // Execute all pending snapshots.
                 takeSnapshot(bitmapSurface.targetResolution, surfaceOutputMatrix.clone())
@@ -543,13 +543,19 @@ private class DefaultSurfaceProcessor(
     // Upstream path: draws the primary input only. Also used while a source switch briefly
     // holds two inputs without a dual source, so the incoming input is never shown as PiP.
     private fun renderSingleInput(renderTimestampNs: Long) {
+        val snapshotSurface = selectSnapshotSurface(surfaceOutputs)
         surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach {
             try {
-                it.updateTransformMatrix(surfaceOutputMatrix, textureMatrix)
+                it.updateTransformMatrix(singleInputOutputMatrix, textureMatrix)
+                // Keep surfaceOutputMatrix aligned with the snapshot target (and unmirrored when
+                // possible so mirrored front-camera preview does not flip snapshots).
+                if (it === snapshotSurface) {
+                    singleInputOutputMatrix.copyInto(surfaceOutputMatrix)
+                }
                 if (it.isStreaming()) {
                     renderer.render(
                         renderTimestampNs,
-                        surfaceOutputMatrix,
+                        singleInputOutputMatrix,
                         it.targetSurface,
                         isMuted
                     )
@@ -678,4 +684,13 @@ class DefaultSurfaceProcessorFactory(private val cfrFps: Int = 0) :
             cfrFps
         )
     }
+}
+
+@OptIn(InternalStreamPackApi::class)
+internal fun selectSnapshotSurface(surfaceOutputs: List<ISurfaceOutput>): ISurfaceOutput? {
+    val typedOutputs = surfaceOutputs.filterIsInstance<SurfaceOutput>()
+    return typedOutputs.filter { !it.needMirroring }
+        .maxByOrNull { it.targetResolution.width * it.targetResolution.height }
+        ?: typedOutputs.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
+        ?: surfaceOutputs.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
 }
