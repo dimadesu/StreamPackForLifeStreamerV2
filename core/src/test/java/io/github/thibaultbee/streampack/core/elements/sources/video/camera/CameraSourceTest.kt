@@ -435,5 +435,51 @@ class CameraSourceTest {
 
         source.release()
     }
+
+    @Test
+    fun `configure skips preview reattach when effective input size matches and reattaches when it changes`() = runTest {
+        val source = createCameraSource("0")
+        val processor = mockk<ISurfaceProcessorInternal>(relaxed = true)
+        val previewSurface = mockk<Surface>(relaxed = true)
+
+        source.setSurfaceProcessor(processor)
+        assertEquals(Size(1080, 1920), source.getPreviewSize(Size(1080, 2200), SurfaceHolder::class.java))
+        source.setPreview(previewSurface)
+
+        verify(exactly = 1) { processor.addOutputSurface(any()) }
+        verify(exactly = 0) { processor.removeOutputSurface(any<ISurfaceOutput>()) }
+
+        // Same 1920x1080 effective input size as pre-configure rotated preview size -> no churn
+        source.configure(VideoSourceConfig(resolution = Size(1920, 1080)))
+        verify(exactly = 1) { processor.addOutputSurface(any()) }
+        verify(exactly = 0) { processor.removeOutputSurface(any<ISurfaceOutput>()) }
+
+        // Different input size -> detaches old output and attaches updated one
+        source.configure(VideoSourceConfig(resolution = Size(1440, 1080)))
+        verify(exactly = 1) { processor.removeOutputSurface(any<ISurfaceOutput>()) }
+        verify(exactly = 2) { processor.addOutputSurface(any()) }
+
+        source.release()
+    }
+
+    @Test
+    fun `setSurfaceProcessor directly detaches from previous processor when replaced`() = runTest {
+        val source = createCameraSource("0")
+        val processor1 = mockk<ISurfaceProcessorInternal>(relaxed = true)
+        val processor2 = mockk<ISurfaceProcessorInternal>(relaxed = true)
+        val previewSurface = mockk<Surface>(relaxed = true)
+
+        source.configure(VideoSourceConfig(resolution = Size(1920, 1080)))
+        source.setSurfaceProcessor(processor1)
+        source.getPreviewSize(Size(1080, 2200), SurfaceHolder::class.java)
+        source.setPreview(previewSurface)
+
+        source.setSurfaceProcessor(processor2)
+
+        verify(exactly = 1) { processor1.removeOutputSurface(any<ISurfaceOutput>()) }
+        verify(exactly = 1) { processor2.addOutputSurface(any()) }
+
+        source.release()
+    }
 }
 

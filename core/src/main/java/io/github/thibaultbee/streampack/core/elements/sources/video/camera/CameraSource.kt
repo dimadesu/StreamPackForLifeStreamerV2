@@ -109,15 +109,11 @@ internal class CameraSource(
     private val _isPreviewingFlow = MutableStateFlow(false)
     override val isPreviewingFlow = _isPreviewingFlow.asStateFlow()
 
-    @Volatile
-    private var surfaceProcessor: ISurfaceProcessorInternal? = null
-    private var attachedProcessor: ISurfaceProcessorInternal? = null
-    private var attachedInputResolution: Size? = null
-
     private val previewLock = Any()
+    private var surfaceProcessor: ISurfaceProcessorInternal? = null
     private var previewSurface: Surface? = null
     private var previewSize: Size? = null
-    private var previewOutput: SurfaceOutput? = null
+    private var previewAttachment: PreviewAttachment? = null
 
     @Volatile
     private var savedConfig: VideoSourceConfig? = null
@@ -170,25 +166,20 @@ internal class CameraSource(
 
     override fun setSurfaceProcessor(processor: ISurfaceProcessorInternal) {
         synchronized(previewLock) {
-            if (attachedProcessor != null && attachedProcessor !== processor) {
-                detachPreviewOutputLocked()
-            }
             surfaceProcessor = processor
             attachPreviewOutputLocked()
         }
     }
 
     private fun detachPreviewOutputLocked() {
-        previewOutput?.let { output ->
+        previewAttachment?.let { (processor, output, _) ->
             try {
-                (attachedProcessor ?: surfaceProcessor)?.removeOutputSurface(output)
+                processor.removeOutputSurface(output)
             } catch (t: Throwable) {
                 Logger.w(TAG, "Failed to detach preview output: ${t.message}")
             }
         }
-        previewOutput = null
-        attachedProcessor = null
-        attachedInputResolution = null
+        previewAttachment = null
     }
 
     private fun attachPreviewOutputLocked() {
@@ -198,16 +189,16 @@ internal class CameraSource(
 
         val rotation = context.displayRotation
         val baseProvider = infoProviderFlow.value
-        val inputSize = getConfiguredInputSize()
-        val effectiveInputSize = inputSize
+        val effectiveInputSize = getConfiguredInputSize()
             ?: size.rotate(baseProvider.getRelativeRotationDegrees(rotation, false))
 
-        if (previewOutput != null &&
-            attachedProcessor === processor &&
-            previewOutput?.targetSurface == surface &&
-            previewOutput?.targetResolution == size &&
-            previewOutput?.targetRotation == rotation &&
-            attachedInputResolution == inputSize
+        if (previewAttachment?.matches(
+                processor,
+                surface,
+                size,
+                rotation,
+                effectiveInputSize
+            ) == true
         ) {
             return
         }
@@ -230,9 +221,7 @@ internal class CameraSource(
                 sourceInfoProvider = previewInfoProvider
             )
             processor.addOutputSurface(output)
-            previewOutput = output
-            attachedProcessor = processor
-            attachedInputResolution = inputSize
+            previewAttachment = PreviewAttachment(processor, output, effectiveInputSize)
         } catch (t: Throwable) {
             Logger.w(TAG, "Failed to attach preview output: ${t.message}")
         }
@@ -389,7 +378,7 @@ internal class CameraSource(
         }
         synchronized(previewLock) {
             // Only refresh an attached output; after resetOutput, setSurfaceProcessor re-attaches.
-            if (previewOutput != null) {
+            if (previewAttachment != null) {
                 attachPreviewOutputLocked()
             }
         }
@@ -486,6 +475,7 @@ internal class CameraSource(
     override suspend fun release() {
         synchronized(previewLock) {
             detachPreviewOutputLocked()
+            surfaceProcessor = null
             previewSurface = null
             previewSize = null
         }
@@ -512,6 +502,24 @@ internal class CameraSource(
 
     override fun toString(): String {
         return "CameraSource(id=$cameraId)"
+    }
+
+    private data class PreviewAttachment(
+        val processor: ISurfaceProcessorInternal,
+        val output: SurfaceOutput,
+        val inputSize: Size
+    ) {
+        fun matches(
+            processor: ISurfaceProcessorInternal,
+            surface: Surface,
+            size: Size,
+            rotation: Int,
+            inputSize: Size
+        ) = this.processor === processor &&
+            output.targetSurface === surface &&
+            output.targetResolution == size &&
+            output.targetRotation == rotation &&
+            this.inputSize == inputSize
     }
 
     companion object {
