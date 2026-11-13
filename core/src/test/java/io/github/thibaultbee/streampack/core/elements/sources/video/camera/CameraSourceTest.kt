@@ -435,26 +435,5 @@ class CameraSourceTest {
 
         source.release()
     }
-
-    @Test
-    fun `setPreview without getPreviewSize before configure attaches once input size is known`() = runTest {
-        val source = createCameraSource("0")
-        val processor = mockk<ISurfaceProcessorInternal>(relaxed = true)
-        val previewSurface = mockk<Surface>(relaxed = true)
-
-        source.setPreview(previewSurface)
-        source.startPreview()
-
-        source.configure(VideoSourceConfig(resolution = Size(1920, 1080)))
-        source.setSurfaceProcessor(processor)
-        source.setOutput(mockk(relaxed = true))
-
-        val outputSlot = slot<ISurfaceOutput>()
-        verify(exactly = 1) { processor.addOutputSurface(capture(outputSlot)) }
-        assertEquals(Size(1080, 1920), outputSlot.captured.targetResolution)
-        assertTrue(activeTargets.contains("stream"))
-
-        source.release()
-    }
 }
 

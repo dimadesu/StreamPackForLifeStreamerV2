@@ -117,13 +117,6 @@ internal class CameraSource(
     private val previewLock = Any()
     private var previewSurface: Surface? = null
     private var previewSize: Size? = null
-
-    // Display rotation [previewSize] was computed for. The preview surface buffer was sized
-    // for this rotation, so the preview output keeps using it until a new size is requested.
-    private var previewSizeRotation: Int? = null
-
-    // Last view size passed to getPreviewSize, reused when previewSize is computed lazily.
-    private var previewTargetSize: Size? = null
     private var previewOutput: SurfaceOutput? = null
 
     @Volatile
@@ -201,18 +194,9 @@ internal class CameraSource(
     private fun attachPreviewOutputLocked() {
         val processor = surfaceProcessor ?: return
         val surface = previewSurface ?: return
-        if (previewSize == null) {
-            // setPreview was called without getPreviewSize: compute it once an input size
-            // (or the last requested view size) is known.
-            val currentRotation = context.displayRotation
-            previewSize = computePreviewSize(currentRotation, previewTargetSize) ?: return
-            previewSizeRotation = currentRotation
-        }
         val size = previewSize ?: return
-        // Use the rotation the size was computed for, not the current display rotation:
-        // the surface buffer matches it, and PreviewView requests a new size on rotation.
-        val rotation = previewSizeRotation ?: context.displayRotation
 
+        val rotation = context.displayRotation
         val baseProvider = infoProviderFlow.value
         val inputSize = getConfiguredInputSize()
         val effectiveInputSize = inputSize
@@ -257,18 +241,17 @@ internal class CameraSource(
     private fun getConfiguredInputSize(): Size? =
         savedConfig?.let { infoProviderFlow.value.getSurfaceSize(it.resolution) }
 
-    private fun getUprightSize(bufferSize: Size, displayRotation: Int): Size =
+    private fun getUprightSize(bufferSize: Size): Size =
         bufferSize.rotate(
-            infoProviderFlow.value.getRelativeRotationDegrees(displayRotation, false)
+            infoProviderFlow.value.getRelativeRotationDegrees(context.displayRotation, false)
         )
 
     private inline fun computePreviewSize(
-        displayRotation: Int,
         targetSize: Size? = null,
         fallbackBufferSize: () -> Size? = { null }
     ): Size? {
         val sourceBufferSize = getConfiguredInputSize() ?: fallbackBufferSize() ?: return null
-        return scalePreviewSize(getUprightSize(sourceBufferSize, displayRotation), targetSize)
+        return scalePreviewSize(getUprightSize(sourceBufferSize), targetSize)
     }
 
     /**
@@ -281,9 +264,8 @@ internal class CameraSource(
         synchronized(previewLock) {
             if (previewSurface == null) return false
             val size = previewSize ?: return false
-            val rotation = previewSizeRotation ?: return false
             val inputSize = getConfiguredInputSize() ?: return false
-            return !hasSameAspectRatio(size, getUprightSize(inputSize, rotation))
+            return !hasSameAspectRatio(size, getUprightSize(inputSize))
         }
     }
 
@@ -339,6 +321,9 @@ internal class CameraSource(
             }
             synchronized(previewLock) {
                 previewSurface = surface
+                if (previewSize == null) {
+                    previewSize = computePreviewSize()
+                }
                 attachPreviewOutputLocked()
             }
         }
@@ -403,8 +388,7 @@ internal class CameraSource(
             Logger.w(TAG, "Failed to set fps: ${t.message}")
         }
         synchronized(previewLock) {
-            // Only refresh an attached output. After resetOutput, setSurfaceProcessor
-            // re-attaches (and lazily computes previewSize if needed).
+            // Only refresh an attached output; after resetOutput, setSurfaceProcessor re-attaches.
             if (previewOutput != null) {
                 attachPreviewOutputLocked()
             }
@@ -413,14 +397,11 @@ internal class CameraSource(
 
 
     override fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size {
-        val rotation = context.displayRotation
-        val selectedSize = computePreviewSize(rotation, targetSize) {
+        val selectedSize = computePreviewSize(targetSize) {
             CameraSizes.getPreviewOutputSize(characteristics, targetSize, targetClass)
         }!!
         synchronized(previewLock) {
             previewSize = selectedSize
-            previewSizeRotation = rotation
-            previewTargetSize = targetSize
         }
         return selectedSize
     }
@@ -507,8 +488,6 @@ internal class CameraSource(
             detachPreviewOutputLocked()
             previewSurface = null
             previewSize = null
-            previewSizeRotation = null
-            previewTargetSize = null
         }
         streamMutex.withLock {
             isStreamRequested = false
