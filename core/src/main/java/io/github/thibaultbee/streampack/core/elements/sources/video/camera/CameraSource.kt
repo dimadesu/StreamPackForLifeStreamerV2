@@ -54,6 +54,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
+import kotlin.reflect.KMutableProperty0
 
 /**
  * Camera source implementation.
@@ -379,22 +380,56 @@ internal class CameraSource(
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
-    override suspend fun startPreview() = withContext(defaultDispatcher) {
+    private suspend fun startCaptureMode(
+        name: String,
+        flow: MutableStateFlow<Boolean>,
+        requested: KMutableProperty0<Boolean>,
+        onStarted: () -> Unit = {}
+    ) = withContext(defaultDispatcher) {
         streamMutex.withLock {
-            if (isPreviewingFlow.value) {
-                Logger.w(TAG, "Camera is already previewing")
+            if (flow.value) {
+                Logger.w(TAG, "Camera is already ${name}ing")
                 return@withLock
             }
-            isPreviewRequested = true
+            requested.set(true)
             try {
                 syncStreamTargetUnsafe()
-                _isPreviewingFlow.emit(true)
+                flow.emit(true)
+                onStarted()
             } catch (t: Throwable) {
-                isPreviewRequested = false
+                requested.set(false)
                 throw t
             }
         }
     }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun stopCaptureMode(
+        name: String,
+        flow: MutableStateFlow<Boolean>,
+        requested: KMutableProperty0<Boolean>,
+        onStopping: () -> Unit = {}
+    ) = withContext(defaultDispatcher) {
+        streamMutex.withLock {
+            if (!flow.value && !requested.get()) {
+                Logger.w(TAG, "Camera is not ${name}ing")
+                return@withLock
+            }
+            requested.set(false)
+            try {
+                onStopping()
+                syncStreamTargetUnsafe()
+            } catch (t: Throwable) {
+                Logger.w(TAG, "Failed to stop $name: $t")
+            } finally {
+                flow.emit(false)
+            }
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.CAMERA)
+    override suspend fun startPreview() =
+        startCaptureMode("preview", _isPreviewingFlow, ::isPreviewRequested)
 
     override suspend fun setOnFirstFrameListener(listener: () -> Unit) {
         controller.addCaptureCallbackListener(object : CaptureResultListener {
@@ -406,64 +441,20 @@ internal class CameraSource(
     }
 
     @SuppressLint("MissingPermission")
-    override suspend fun stopPreview() {
-        withContext(defaultDispatcher) {
-            streamMutex.withLock {
-                if (!isPreviewingFlow.value && !isPreviewRequested) {
-                    Logger.w(TAG, "Camera is not previewing")
-                    return@withLock
-                }
-
-                isPreviewRequested = false
-                try {
-                    syncStreamTargetUnsafe()
-                } catch (t: Throwable) {
-                    Logger.w(TAG, "Failed to stop preview: $t")
-                } finally {
-                    _isPreviewingFlow.emit(false)
-                }
-            }
-        }
-    }
+    override suspend fun stopPreview() =
+        stopCaptureMode("preview", _isPreviewingFlow, ::isPreviewRequested)
 
     @RequiresPermission(Manifest.permission.CAMERA)
-    override suspend fun startStream() = withContext(defaultDispatcher) {
-        streamMutex.withLock {
-            if (isStreamingFlow.value) {
-                Logger.w(TAG, "Camera is already streaming")
-                return@withLock
-            }
-            isStreamRequested = true
-            try {
-                syncStreamTargetUnsafe()
-                _isStreamingFlow.emit(true)
-                controller.muteVibrationAndSound()
-            } catch (t: Throwable) {
-                isStreamRequested = false
-                throw t
-            }
+    override suspend fun startStream() =
+        startCaptureMode("stream", _isStreamingFlow, ::isStreamRequested) {
+            controller.muteVibrationAndSound()
         }
-    }
 
     @SuppressLint("MissingPermission")
-    override suspend fun stopStream() = withContext(defaultDispatcher) {
-        streamMutex.withLock {
-            if (!isStreamingFlow.value && !isStreamRequested) {
-                Logger.w(TAG, "Camera is not streaming")
-                return@withLock
-            }
-
-            isStreamRequested = false
-            try {
-                controller.unmuteVibrationAndSound()
-                syncStreamTargetUnsafe()
-            } catch (t: Throwable) {
-                Logger.w(TAG, "Failed to stop stream: $t")
-            } finally {
-                _isStreamingFlow.emit(false)
-            }
+    override suspend fun stopStream() =
+        stopCaptureMode("stream", _isStreamingFlow, ::isStreamRequested) {
+            controller.unmuteVibrationAndSound()
         }
-    }
 
     override suspend fun release() {
         synchronized(previewLock) {
