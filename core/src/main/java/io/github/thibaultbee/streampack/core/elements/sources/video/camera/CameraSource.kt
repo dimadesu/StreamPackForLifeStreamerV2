@@ -239,6 +239,16 @@ internal class CameraSource(
     private fun getConfiguredInputSize(): Size? =
         savedConfig?.let { infoProviderFlow.value.getSurfaceSize(it.resolution) }
 
+    private inline fun computePreviewSize(
+        targetSize: Size? = null,
+        fallbackBufferSize: () -> Size? = { null }
+    ): Size? {
+        val baseProvider = infoProviderFlow.value
+        val relRot = baseProvider.getRelativeRotationDegrees(context.displayRotation, false)
+        val sourceBufferSize = getConfiguredInputSize() ?: fallbackBufferSize() ?: return null
+        return scalePreviewSize(sourceBufferSize.rotate(relRot), targetSize)
+    }
+
     private fun scalePreviewSize(uprightSize: Size, targetSize: Size? = null): Size {
         val capScale = MAX_PREVIEW_DIMENSION.toFloat() / maxOf(uprightSize.width, uprightSize.height)
         val scale = if (targetSize != null && targetSize.width > 0 && targetSize.height > 0) {
@@ -285,9 +295,7 @@ internal class CameraSource(
             synchronized(previewLock) {
                 previewSurface = surface
                 if (previewSize == null) {
-                    val baseProvider = infoProviderFlow.value
-                    val relRot = baseProvider.getRelativeRotationDegrees(context.displayRotation, false)
-                    previewSize = getConfiguredInputSize()?.rotate(relRot)?.let { scalePreviewSize(it) }
+                    previewSize = computePreviewSize()
                 }
                 attachPreviewOutputLocked()
             }
@@ -361,12 +369,9 @@ internal class CameraSource(
 
 
     override fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size {
-        val baseProvider = infoProviderFlow.value
-        val relRot = baseProvider.getRelativeRotationDegrees(context.displayRotation, false)
-        val sourceBufferSize = getConfiguredInputSize()
-            ?: CameraSizes.getPreviewOutputSize(characteristics, targetSize, targetClass)
-        val uprightSize = sourceBufferSize.rotate(relRot)
-        val selectedSize = scalePreviewSize(uprightSize, targetSize)
+        val selectedSize = computePreviewSize(targetSize) {
+            CameraSizes.getPreviewOutputSize(characteristics, targetSize, targetClass)
+        }!!
         synchronized(previewLock) {
             previewSize = selectedSize
         }
