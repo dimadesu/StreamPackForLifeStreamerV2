@@ -120,6 +120,14 @@ interface IPreviewableSource {
     fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size
 
     /**
+     * Whether the preview surface must be re-requested because the preview size no longer
+     * matches the source (e.g. the aspect ratio changed after a new video source configuration).
+     *
+     * @return `true` if the preview size is stale, `false` otherwise
+     */
+    fun needsPreviewRefresh(): Boolean = false
+
+    /**
      * Registers a one-shot listener called when the first frame is produced for the preview.
      * Default implementation invokes the listener immediately.
      *

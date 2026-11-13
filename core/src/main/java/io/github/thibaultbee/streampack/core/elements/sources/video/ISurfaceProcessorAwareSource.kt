@@ -14,12 +14,6 @@ interface ISurfaceProcessorAwareSource {
     fun setSurfaceProcessor(processor: ISurfaceProcessorInternal)
 
     /**
-     * Whether the preview surface must be re-requested because the preview size no longer
-     * matches the source (e.g. the aspect ratio changed after a new [VideoSourceConfig]).
-     */
-    fun needsPreviewRefresh(): Boolean = false
-
-    /**
      * Marker interface for factories creating an [ISurfaceProcessorAwareSource].
      */
     @SubclassOptInRequired(InternalStreamPackApi::class)

@@ -471,8 +471,7 @@ internal class VideoInput(
      * letterboxed inside a stale buffer.
      */
     private suspend fun refreshPreviewIfNeededUnsafe() {
-        val source = sourceInternalFlow.value
-        if (source !is ISurfaceProcessorAwareSource || source !is IPreviewableSource) return
+        val source = sourceInternalFlow.value as? IPreviewableSource ?: return
         try {
             if (source.needsPreviewRefresh()) {
                 Logger.i(TAG, "Preview size is stale after configuration change, refreshing")
