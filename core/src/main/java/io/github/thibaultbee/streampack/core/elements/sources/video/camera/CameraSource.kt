@@ -53,6 +53,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.reflect.KMutableProperty0
 
@@ -116,6 +117,13 @@ internal class CameraSource(
     private val previewLock = Any()
     private var previewSurface: Surface? = null
     private var previewSize: Size? = null
+
+    // Display rotation [previewSize] was computed for. The preview surface buffer was sized
+    // for this rotation, so the preview output keeps using it until a new size is requested.
+    private var previewSizeRotation: Int? = null
+
+    // Last view size passed to getPreviewSize, reused when previewSize is computed lazily.
+    private var previewTargetSize: Size? = null
     private var previewOutput: SurfaceOutput? = null
 
     @Volatile
@@ -193,9 +201,18 @@ internal class CameraSource(
     private fun attachPreviewOutputLocked() {
         val processor = surfaceProcessor ?: return
         val surface = previewSurface ?: return
+        if (previewSize == null) {
+            // setPreview was called without getPreviewSize: compute it once an input size
+            // (or the last requested view size) is known.
+            val currentRotation = context.displayRotation
+            previewSize = computePreviewSize(currentRotation, previewTargetSize) ?: return
+            previewSizeRotation = currentRotation
+        }
         val size = previewSize ?: return
+        // Use the rotation the size was computed for, not the current display rotation:
+        // the surface buffer matches it, and PreviewView requests a new size on rotation.
+        val rotation = previewSizeRotation ?: context.displayRotation
 
-        val rotation = context.displayRotation
         val baseProvider = infoProviderFlow.value
         val inputSize = getConfiguredInputSize()
         val effectiveInputSize = inputSize
@@ -240,14 +257,41 @@ internal class CameraSource(
     private fun getConfiguredInputSize(): Size? =
         savedConfig?.let { infoProviderFlow.value.getSurfaceSize(it.resolution) }
 
+    private fun getUprightSize(bufferSize: Size, displayRotation: Int): Size =
+        bufferSize.rotate(
+            infoProviderFlow.value.getRelativeRotationDegrees(displayRotation, false)
+        )
+
     private inline fun computePreviewSize(
+        displayRotation: Int,
         targetSize: Size? = null,
         fallbackBufferSize: () -> Size? = { null }
     ): Size? {
-        val baseProvider = infoProviderFlow.value
-        val relRot = baseProvider.getRelativeRotationDegrees(context.displayRotation, false)
         val sourceBufferSize = getConfiguredInputSize() ?: fallbackBufferSize() ?: return null
-        return scalePreviewSize(sourceBufferSize.rotate(relRot), targetSize)
+        return scalePreviewSize(getUprightSize(sourceBufferSize, displayRotation), targetSize)
+    }
+
+    /**
+     * Whether the preview size no longer matches the aspect ratio of the configured camera
+     * buffer, e.g. because it was computed from a fallback size before [configure] or the
+     * resolution aspect ratio changed. The preview surface must then be re-requested so its
+     * buffer gets a matching size; otherwise the preview is letterboxed inside it.
+     */
+    override fun needsPreviewRefresh(): Boolean {
+        synchronized(previewLock) {
+            if (previewSurface == null) return false
+            val size = previewSize ?: return false
+            val rotation = previewSizeRotation ?: return false
+            val inputSize = getConfiguredInputSize() ?: return false
+            return !hasSameAspectRatio(size, getUprightSize(inputSize, rotation))
+        }
+    }
+
+    private fun hasSameAspectRatio(a: Size, b: Size): Boolean {
+        val ratioA = a.width.toFloat() / a.height
+        val ratioB = b.width.toFloat() / b.height
+        // Tolerance absorbs the even-pixel rounding done in scalePreviewSize.
+        return abs(ratioA - ratioB) <= ASPECT_RATIO_TOLERANCE * ratioB
     }
 
     private fun scalePreviewSize(uprightSize: Size, targetSize: Size? = null): Size {
@@ -295,9 +339,6 @@ internal class CameraSource(
             }
             synchronized(previewLock) {
                 previewSurface = surface
-                if (previewSize == null) {
-                    previewSize = computePreviewSize()
-                }
                 attachPreviewOutputLocked()
             }
         }
@@ -362,6 +403,8 @@ internal class CameraSource(
             Logger.w(TAG, "Failed to set fps: ${t.message}")
         }
         synchronized(previewLock) {
+            // Only refresh an attached output. After resetOutput, setSurfaceProcessor
+            // re-attaches (and lazily computes previewSize if needed).
             if (previewOutput != null) {
                 attachPreviewOutputLocked()
             }
@@ -370,11 +413,14 @@ internal class CameraSource(
 
 
     override fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size {
-        val selectedSize = computePreviewSize(targetSize) {
+        val rotation = context.displayRotation
+        val selectedSize = computePreviewSize(rotation, targetSize) {
             CameraSizes.getPreviewOutputSize(characteristics, targetSize, targetClass)
         }!!
         synchronized(previewLock) {
             previewSize = selectedSize
+            previewSizeRotation = rotation
+            previewTargetSize = targetSize
         }
         return selectedSize
     }
@@ -461,6 +507,8 @@ internal class CameraSource(
             detachPreviewOutputLocked()
             previewSurface = null
             previewSize = null
+            previewSizeRotation = null
+            previewTargetSize = null
         }
         streamMutex.withLock {
             isStreamRequested = false
@@ -492,5 +540,6 @@ internal class CameraSource(
 
         private const val STREAM_NAME = "stream"
         private const val MAX_PREVIEW_DIMENSION = 1920
+        private const val ASPECT_RATIO_TOLERANCE = 0.01f
     }
 }

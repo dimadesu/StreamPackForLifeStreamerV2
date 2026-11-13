@@ -73,7 +73,8 @@ class CameraSourceTest {
         Shadows.shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
 
         val backMap = mockk<StreamConfigurationMap>()
-        val supportedSizes = arrayOf(Size(3840, 2160), Size(1920, 1080), Size(1280, 720))
+        val supportedSizes =
+            arrayOf(Size(3840, 2160), Size(1920, 1080), Size(1440, 1080), Size(1280, 720))
         every { backMap.getOutputSizes(SurfaceTexture::class.java) } returns supportedSizes
         every { backMap.getOutputSizes(SurfaceHolder::class.java) } returns supportedSizes
 
@@ -372,6 +373,86 @@ class CameraSourceTest {
         assertTrue(activeTargets.isEmpty())
         coVerify(exactly = 0) { anyConstructed<CameraController>().addTarget(any()) }
         coVerify(exactly = 0) { anyConstructed<CameraController>().removeTarget(any()) }
+
+        source.release()
+    }
+
+    @Test
+    fun `preview size from fallback before configure is reported stale when aspect differs`() = runTest {
+        val source = createCameraSource("0")
+        val processor = mockk<ISurfaceProcessorInternal>(relaxed = true)
+        val previewSurface = mockk<Surface>(relaxed = true)
+
+        // Before configure: fallback picks a 16:9 camera size for the view
+        assertEquals(
+            Size(1080, 1920),
+            source.getPreviewSize(Size(1080, 2200), SurfaceHolder::class.java)
+        )
+        source.setPreview(previewSurface)
+        assertFalse(source.needsPreviewRefresh())
+
+        // Stream configured as 4:3: the 9:16 preview buffer no longer matches
+        source.configure(VideoSourceConfig(resolution = Size(1440, 1080)))
+        source.setSurfaceProcessor(processor)
+        source.setOutput(mockk(relaxed = true))
+        assertTrue(source.needsPreviewRefresh())
+
+        // PreviewView re-requests: new size matches the configured buffer
+        assertEquals(
+            Size(1080, 1440),
+            source.getPreviewSize(Size(1080, 2200), SurfaceHolder::class.java)
+        )
+        source.setPreview(mockk(relaxed = true))
+        assertFalse(source.needsPreviewRefresh())
+
+        source.release()
+    }
+
+    @Test
+    fun `same aspect ratio resolution change does not require preview refresh`() = runTest {
+        val source = createCameraSource("0")
+        val previewSurface = mockk<Surface>(relaxed = true)
+
+        source.configure(VideoSourceConfig(resolution = Size(1920, 1080)))
+        source.getPreviewSize(Size(1080, 2200), SurfaceHolder::class.java)
+        source.setPreview(previewSurface)
+        assertFalse(source.needsPreviewRefresh())
+
+        source.configure(VideoSourceConfig(resolution = Size(1280, 720)))
+        assertFalse(source.needsPreviewRefresh())
+
+        source.release()
+    }
+
+    @Test
+    fun `no preview refresh needed without a preview surface`() = runTest {
+        val source = createCameraSource("0")
+
+        source.getPreviewSize(Size(1080, 2200), SurfaceHolder::class.java)
+        source.configure(VideoSourceConfig(resolution = Size(1440, 1080)))
+
+        assertFalse(source.needsPreviewRefresh())
+
+        source.release()
+    }
+
+    @Test
+    fun `setPreview without getPreviewSize before configure attaches once input size is known`() = runTest {
+        val source = createCameraSource("0")
+        val processor = mockk<ISurfaceProcessorInternal>(relaxed = true)
+        val previewSurface = mockk<Surface>(relaxed = true)
+
+        source.setPreview(previewSurface)
+        source.startPreview()
+
+        source.configure(VideoSourceConfig(resolution = Size(1920, 1080)))
+        source.setSurfaceProcessor(processor)
+        source.setOutput(mockk(relaxed = true))
+
+        val outputSlot = slot<ISurfaceOutput>()
+        verify(exactly = 1) { processor.addOutputSurface(capture(outputSlot)) }
+        assertEquals(Size(1080, 1920), outputSlot.captured.targetResolution)
+        assertTrue(activeTargets.contains("stream"))
 
         source.release()
     }

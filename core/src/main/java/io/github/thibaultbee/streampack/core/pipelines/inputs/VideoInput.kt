@@ -460,7 +460,26 @@ internal class VideoInput(
                     _sourceConfigFlow.emit(null)
                     throw t
                 }
+                refreshPreviewIfNeededUnsafe()
             }
+        }
+    }
+
+    /**
+     * Re-requests the preview surface when the source reports that its preview size no longer
+     * matches the new configuration (e.g. aspect ratio change), so the preview is not
+     * letterboxed inside a stale buffer.
+     */
+    private suspend fun refreshPreviewIfNeededUnsafe() {
+        val source = sourceInternalFlow.value
+        if (source !is ISurfaceProcessorAwareSource || source !is IPreviewableSource) return
+        try {
+            if (source.needsPreviewRefresh()) {
+                Logger.i(TAG, "Preview size is stale after configuration change, refreshing")
+                previewSurfaceProvider?.onPreparePreview(source)
+            }
+        } catch (t: Throwable) {
+            Logger.w(TAG, "Failed to refresh preview after configuration change: ${t.message}")
         }
     }
 
