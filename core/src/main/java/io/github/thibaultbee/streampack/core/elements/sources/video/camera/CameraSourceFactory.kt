@@ -18,7 +18,7 @@ package io.github.thibaultbee.streampack.core.elements.sources.video.camera
 import android.Manifest
 import android.content.Context
 import androidx.annotation.RequiresPermission
-import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
+import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProcessorAwareSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.cameraManager
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.defaultCameraId
@@ -41,7 +41,7 @@ fun CameraSourceFactory(context: Context) =
  * @param cameraId the camera id to use.
  */
 @OptIn(InternalStreamPackApi::class)
-class CameraSourceFactory(val cameraId: String) : IVideoSource.Factory {
+class CameraSourceFactory(val cameraId: String) : ISurfaceProcessorAwareSource.Factory {
     @RequiresPermission(Manifest.permission.CAMERA)
     override suspend fun create(
         context: Context,

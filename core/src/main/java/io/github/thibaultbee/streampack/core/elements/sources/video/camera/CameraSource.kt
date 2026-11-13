@@ -26,7 +26,11 @@ import android.util.Size
 import android.view.Surface
 import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
+import io.github.thibaultbee.streampack.core.elements.processing.video.ISurfaceProcessorInternal
+import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
+import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.sources.video.AbstractPreviewableSource
+import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProcessorAwareSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.VideoSourceConfig
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.controllers.CameraController
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.cameraManager
@@ -37,6 +41,8 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CameraSurface
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CaptureRequestWithTargetsBuilder
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.utils.CaptureResultListener
+import io.github.thibaultbee.streampack.core.elements.utils.extensions.displayRotation
+import io.github.thibaultbee.streampack.core.elements.utils.extensions.rotate
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.logger.Logger
 import io.github.thibaultbee.streampack.core.utils.InternalStreamPackApi
@@ -47,6 +53,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 /**
  * Camera source implementation.
@@ -58,7 +65,7 @@ internal class CameraSource(
     private val context: Context,
     override val cameraId: String,
     dispatcherProvider: CameraDispatcherProvider,
-) : ICameraSourceInternal, ICameraSource, AbstractPreviewableSource() {
+) : ICameraSourceInternal, ICameraSource, ISurfaceProcessorAwareSource, AbstractPreviewableSource() {
     private val defaultDispatcher = dispatcherProvider.default
     private val coroutineScope = CoroutineScope(defaultDispatcher)
 
@@ -100,6 +107,23 @@ internal class CameraSource(
     private val _isPreviewingFlow = MutableStateFlow(false)
     override val isPreviewingFlow = _isPreviewingFlow.asStateFlow()
 
+    @Volatile
+    private var surfaceProcessor: ISurfaceProcessorInternal? = null
+    private var attachedProcessor: ISurfaceProcessorInternal? = null
+    private var attachedInputResolution: Size? = null
+
+    private val previewLock = Any()
+    private var previewSurface: Surface? = null
+    private var previewSize: Size? = null
+    private var previewOutput: SurfaceOutput? = null
+
+    @Volatile
+    private var savedConfig: VideoSourceConfig? = null
+
+    // Protected by streamMutex
+    private var isStreamRequested = false
+    private var isPreviewRequested = false
+    private var isExpectingSessionClose = false
     private val streamMutex = Mutex()
 
     init {
@@ -111,10 +135,22 @@ internal class CameraSource(
         }
 
         coroutineScope.launch {
+            var wasActive = false
             controller.isActiveFlow.collect { isAvailable ->
-                if (!isAvailable) {
-                    _isStreamingFlow.emit(false)
-                    _isPreviewingFlow.emit(false)
+                streamMutex.withLock {
+                    if (isAvailable) {
+                        isExpectingSessionClose = false
+                    } else if (wasActive) {
+                        if (isExpectingSessionClose) {
+                            isExpectingSessionClose = false
+                        } else {
+                            isStreamRequested = false
+                            isPreviewRequested = false
+                            _isStreamingFlow.emit(false)
+                            _isPreviewingFlow.emit(false)
+                        }
+                    }
+                    wasActive = isAvailable
                 }
             }
         }
@@ -130,8 +166,114 @@ internal class CameraSource(
         }
     }
 
+    override fun setSurfaceProcessor(processor: ISurfaceProcessorInternal) {
+        synchronized(previewLock) {
+            if (attachedProcessor != null && attachedProcessor !== processor) {
+                detachPreviewOutputLocked()
+            }
+            surfaceProcessor = processor
+            attachPreviewOutputLocked()
+        }
+    }
+
+    private fun detachPreviewOutputLocked() {
+        previewOutput?.let { output ->
+            try {
+                (attachedProcessor ?: surfaceProcessor)?.removeOutputSurface(output)
+            } catch (t: Throwable) {
+                Logger.w(TAG, "Failed to detach preview output: ${t.message}")
+            }
+        }
+        previewOutput = null
+        attachedProcessor = null
+        attachedInputResolution = null
+    }
+
+    private fun attachPreviewOutputLocked() {
+        val processor = surfaceProcessor ?: return
+        val surface = previewSurface ?: return
+        val size = previewSize ?: return
+
+        val rotation = context.displayRotation
+        val baseProvider = infoProviderFlow.value
+        val inputSize = getConfiguredInputSize()
+        val effectiveInputSize = inputSize
+            ?: size.rotate(baseProvider.getRelativeRotationDegrees(rotation, false))
+
+        if (previewOutput != null &&
+            attachedProcessor === processor &&
+            previewOutput?.targetSurface == surface &&
+            previewOutput?.targetResolution == size &&
+            previewOutput?.targetRotation == rotation &&
+            attachedInputResolution == inputSize
+        ) {
+            return
+        }
+
+        detachPreviewOutputLocked()
+        try {
+            // Keep source size aligned with the actual camera buffer (or rotated preview size
+            // before configure) so SurfaceOutput preserves aspect ratio without area-only lookup.
+            val previewInfoProvider = object : ISourceInfoProvider by baseProvider {
+                override fun getSurfaceSize(targetResolution: Size) = effectiveInputSize
+            }
+            val output = SurfaceOutput(
+                targetSurface = surface,
+                targetResolution = size,
+                targetRotation = rotation,
+                isStreaming = { _isPreviewingFlow.value },
+                sourceResolution = effectiveInputSize,
+                // Mirror front camera for selfie preview only; the encoded stream stays unmirrored.
+                needMirroring = baseProvider.isMirror,
+                sourceInfoProvider = previewInfoProvider
+            )
+            processor.addOutputSurface(output)
+            previewOutput = output
+            attachedProcessor = processor
+            attachedInputResolution = inputSize
+        } catch (t: Throwable) {
+            Logger.w(TAG, "Failed to attach preview output: ${t.message}")
+        }
+    }
+
+    private fun getConfiguredInputSize(): Size? =
+        savedConfig?.let { infoProviderFlow.value.getSurfaceSize(it.resolution) }
+
+    private fun scalePreviewSize(uprightSize: Size, targetSize: Size? = null): Size {
+        val capScale = MAX_PREVIEW_DIMENSION.toFloat() / maxOf(uprightSize.width, uprightSize.height)
+        val scale = if (targetSize != null && targetSize.width > 0 && targetSize.height > 0) {
+            val viewScale = maxOf(
+                targetSize.width.toFloat() / uprightSize.width,
+                targetSize.height.toFloat() / uprightSize.height
+            )
+            minOf(1f, capScale, viewScale)
+        } else {
+            minOf(1f, capScale)
+        }
+        return Size(
+            (uprightSize.width * scale).roundToInt().coerceAtLeast(2) and 1.inv(),
+            (uprightSize.height * scale).roundToInt().coerceAtLeast(2) and 1.inv()
+        )
+    }
+
+    @RequiresPermission(Manifest.permission.CAMERA)
+    private suspend fun syncStreamTargetUnsafe() {
+        val isNeeded = isStreamRequested || isPreviewRequested
+        if (isNeeded) {
+            if (controller.hasOutput(STREAM_NAME)) {
+                controller.addTarget(STREAM_NAME)
+            }
+        } else {
+            executeIfCameraPermission {
+                controller.removeTarget(STREAM_NAME)
+            }
+        }
+    }
+
     override suspend fun hasPreview() = withContext(defaultDispatcher) {
-        controller.hasOutput(PREVIEW_NAME)
+        synchronized(previewLock) {
+            previewSurface != null
+        }
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
@@ -140,36 +282,61 @@ internal class CameraSource(
             if (isPreviewingFlow.value) {
                 Logger.w(TAG, "Trying to set preview while previewing")
             }
-            controller.addOutput(CameraSurface(PREVIEW_NAME, surface))
+            synchronized(previewLock) {
+                previewSurface = surface
+                if (previewSize == null) {
+                    val baseProvider = infoProviderFlow.value
+                    val relRot = baseProvider.getRelativeRotationDegrees(context.displayRotation, false)
+                    previewSize = getConfiguredInputSize()?.rotate(relRot)?.let { scalePreviewSize(it) }
+                }
+                attachPreviewOutputLocked()
+            }
         }
     }
 
     @SuppressLint("MissingPermission")
     override suspend fun resetPreviewImpl() {
         withContext(defaultDispatcher) {
-            controller.removeOutput(PREVIEW_NAME)
+            synchronized(previewLock) {
+                detachPreviewOutputLocked()
+                previewSurface = null
+            }
         }
     }
 
     override suspend fun getOutput() = controller.getOutput(STREAM_NAME)?.surface
 
     @RequiresPermission(Manifest.permission.CAMERA)
-    override suspend fun setOutput(surface: Surface) {
-        if (isStreamingFlow.value) {
-            Logger.w(TAG, "Trying to set output while streaming")
+    override suspend fun setOutput(surface: Surface) = withContext(defaultDispatcher) {
+        streamMutex.withLock {
+            if (isStreamingFlow.value) {
+                Logger.w(TAG, "Trying to set output while streaming")
+            }
+            controller.addOutput(CameraSurface(STREAM_NAME, surface))
+            if (isStreamRequested || isPreviewRequested) {
+                syncStreamTargetUnsafe()
+            }
         }
-        controller.addOutput(CameraSurface(STREAM_NAME, surface))
     }
 
     @SuppressLint("MissingPermission")
-    override suspend fun resetOutputImpl() {
-        executeIfCameraPermission {
-            controller.removeOutput(STREAM_NAME)
+    override suspend fun resetOutputImpl() = withContext(defaultDispatcher) {
+        // Keep previewSurface intact so StreamPack's resolution reconfiguration
+        // (resetOutput -> configure -> setSurfaceProcessor -> setOutput) re-attaches it.
+        synchronized(previewLock) {
+            detachPreviewOutputLocked()
+        }
+        streamMutex.withLock {
+            isExpectingSessionClose = controller.isActiveFlow.value
+            executeIfCameraPermission {
+                controller.removeOutput(STREAM_NAME)
+            }
         }
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
     override suspend fun configure(config: VideoSourceConfig) {
+        savedConfig = config
         val targetFps = config.cameraFps ?: config.fps
         if (!characteristics.isFpsSupported(targetFps)) {
             Logger.w(TAG, "Camera $cameraId does not support $targetFps fps")
@@ -185,25 +352,42 @@ internal class CameraSource(
         } catch (t: Throwable) {
             Logger.w(TAG, "Failed to set fps: ${t.message}")
         }
+        synchronized(previewLock) {
+            if (previewOutput != null) {
+                attachPreviewOutputLocked()
+            }
+        }
     }
 
 
     override fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size {
-        return CameraSizes.getPreviewOutputSize(
-            characteristics,
-            targetSize,
-            targetClass
-        )
+        val baseProvider = infoProviderFlow.value
+        val relRot = baseProvider.getRelativeRotationDegrees(context.displayRotation, false)
+        val sourceBufferSize = getConfiguredInputSize()
+            ?: CameraSizes.getPreviewOutputSize(characteristics, targetSize, targetClass)
+        val uprightSize = sourceBufferSize.rotate(relRot)
+        val selectedSize = scalePreviewSize(uprightSize, targetSize)
+        synchronized(previewLock) {
+            previewSize = selectedSize
+        }
+        return selectedSize
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
-    override suspend fun startPreview() {
-        withContext(defaultDispatcher) {
+    override suspend fun startPreview() = withContext(defaultDispatcher) {
+        streamMutex.withLock {
             if (isPreviewingFlow.value) {
                 Logger.w(TAG, "Camera is already previewing")
+                return@withLock
             }
-            controller.addTarget(PREVIEW_NAME)
-            _isPreviewingFlow.emit(true)
+            isPreviewRequested = true
+            try {
+                syncStreamTargetUnsafe()
+                _isPreviewingFlow.emit(true)
+            } catch (t: Throwable) {
+                isPreviewRequested = false
+                throw t
+            }
         }
     }
 
@@ -219,58 +403,78 @@ internal class CameraSource(
     @SuppressLint("MissingPermission")
     override suspend fun stopPreview() {
         withContext(defaultDispatcher) {
-            if (!isPreviewingFlow.value) {
-                Logger.w(TAG, "Camera is not previewing")
-                return@withContext
-            }
-
-            try {
-                executeIfCameraPermission {
-                    controller.removeTarget(PREVIEW_NAME)
+            streamMutex.withLock {
+                if (!isPreviewingFlow.value && !isPreviewRequested) {
+                    Logger.w(TAG, "Camera is not previewing")
+                    return@withLock
                 }
-            } catch (t: Throwable) {
-                Logger.w(TAG, "Failed to stop preview: $t")
-            } finally {
-                _isPreviewingFlow.emit(false)
+
+                isPreviewRequested = false
+                try {
+                    syncStreamTargetUnsafe()
+                } catch (t: Throwable) {
+                    Logger.w(TAG, "Failed to stop preview: $t")
+                } finally {
+                    _isPreviewingFlow.emit(false)
+                }
             }
         }
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
-    override suspend fun startStream() = streamMutex.withLock {
-        if (isStreamingFlow.value) {
-            Logger.w(TAG, "Camera is already streaming")
-            return@withLock
+    override suspend fun startStream() = withContext(defaultDispatcher) {
+        streamMutex.withLock {
+            if (isStreamingFlow.value) {
+                Logger.w(TAG, "Camera is already streaming")
+                return@withLock
+            }
+            isStreamRequested = true
+            try {
+                syncStreamTargetUnsafe()
+                _isStreamingFlow.emit(true)
+                controller.muteVibrationAndSound()
+            } catch (t: Throwable) {
+                isStreamRequested = false
+                throw t
+            }
         }
-        controller.addTarget(STREAM_NAME)
-        _isStreamingFlow.emit(true)
-        controller.muteVibrationAndSound()
     }
 
     @SuppressLint("MissingPermission")
-    override suspend fun stopStream() = streamMutex.withLock {
-        if (!isStreamingFlow.value) {
-            Logger.w(TAG, "Camera is not streaming")
-            return@withLock
-        }
-
-        try {
-            controller.unmuteVibrationAndSound()
-            executeIfCameraPermission {
-                controller.removeTarget(STREAM_NAME)
+    override suspend fun stopStream() = withContext(defaultDispatcher) {
+        streamMutex.withLock {
+            if (!isStreamingFlow.value && !isStreamRequested) {
+                Logger.w(TAG, "Camera is not streaming")
+                return@withLock
             }
-        } catch (t: Throwable) {
-            Logger.w(TAG, "Failed to stop stream: $t")
-        } finally {
-            _isStreamingFlow.emit(false)
+
+            isStreamRequested = false
+            try {
+                controller.unmuteVibrationAndSound()
+                syncStreamTargetUnsafe()
+            } catch (t: Throwable) {
+                Logger.w(TAG, "Failed to stop stream: $t")
+            } finally {
+                _isStreamingFlow.emit(false)
+            }
         }
     }
 
     override suspend fun release() {
-        controller.unmuteVibrationAndSound()
-        controller.release()
-        _isStreamingFlow.emit(false)
-        _isPreviewingFlow.emit(false)
+        synchronized(previewLock) {
+            detachPreviewOutputLocked()
+            previewSurface = null
+            previewSize = null
+        }
+        streamMutex.withLock {
+            isStreamRequested = false
+            isPreviewRequested = false
+            isExpectingSessionClose = false
+            controller.unmuteVibrationAndSound()
+            controller.release()
+            _isStreamingFlow.emit(false)
+            _isPreviewingFlow.emit(false)
+        }
     }
 
     private suspend fun executeIfCameraPermission(block: suspend () -> Unit) {
@@ -290,7 +494,7 @@ internal class CameraSource(
     companion object {
         private const val TAG = "CameraSource"
 
-        private const val PREVIEW_NAME = "preview"
         private const val STREAM_NAME = "stream"
+        private const val MAX_PREVIEW_DIMENSION = 1920
     }
 }
