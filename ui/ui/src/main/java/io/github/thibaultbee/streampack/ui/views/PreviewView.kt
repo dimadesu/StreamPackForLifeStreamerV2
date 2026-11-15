@@ -330,7 +330,7 @@ class PreviewView @JvmOverloads constructor(
     }
 
     private fun attachToStreamerIfReady(shouldFailSilently: Boolean) {
-        if (streamer != null && isAttachedToWindow) {
+        if (streamer != null && isAttachedToWindow && windowVisibility == VISIBLE && isShown) {
             try {
                 startPreview(size)
             } catch (t: Throwable) {
@@ -526,8 +526,8 @@ class PreviewView @JvmOverloads constructor(
         videoSource: IPreviewableSource,
         size: Size
     ): ViewfinderSurfaceRequest.Builder? {
-        if (!isAttachedToWindow || display == null) {
-            Logger.d(TAG, "createViewfinderRequestBuilder: view not attached or display null")
+        if (!isAttachedToWindow || windowVisibility != VISIBLE || !isShown || display == null) {
+            Logger.d(TAG, "createViewfinderRequestBuilder: view not visible, not attached, or display null")
             return null
         }
         if (size.height == 0 || size.width == 0) {
