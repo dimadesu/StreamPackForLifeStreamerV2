@@ -62,7 +62,10 @@ internal class VideoFlvStream(codecConfig: VideoCodecConfig) : FlvStream() {
 
     override fun createImpl(frame: Frame): List<FLVData> {
         var withSequenceStart = false
-        if ((!sentSequenceStart) && (frame.isKeyFrame)) {
+        if (!sentSequenceStart) {
+            if (!frame.isKeyFrame) {
+                return emptyList()
+            }
             // Send config
             withSequenceStart = true
             sentSequenceStart = true

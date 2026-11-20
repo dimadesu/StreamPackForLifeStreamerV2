@@ -128,6 +128,10 @@ class FlvTagBuilder(val channel: ChannelWithCloseableData<FLVTag>) {
 
             else -> throw IllegalArgumentException("Invalid stream PID $streamPid for frame $frame")
         }
+        if (flvDatas.isEmpty()) {
+            frame.close()
+            return
+        }
         flvDatas.forEachIndexed { index, flvData ->
             if (index == flvDatas.lastIndex) {
                 // Pass the close callback on the last element
