@@ -98,8 +98,10 @@ open class DynamicEndpoint(
                 if (isOpenFlow == null) {
                     isOpenJob.cancel()
                 } else {
-                    isOpenJob += isOpenFlow.collect { isOpen ->
-                        _isOpenFlow.emit(isOpen)
+                    isOpenJob += launch {
+                        isOpenFlow.collect { isOpen ->
+                            _isOpenFlow.emit(isOpen)
+                        }
                     }
                 }
             }
@@ -165,6 +167,13 @@ open class DynamicEndpoint(
     override suspend fun close() {
         mutex.withLock {
             try {
+                if (endpoint === srtEndpoint) {
+                    try {
+                        endpoint?.stopStream()
+                    } catch (t: Throwable) {
+                        Logger.w(TAG, "Error stopping SRT endpoint during close: $t")
+                    }
+                }
                 endpoint?.close()
             } finally {
                 _isOpenFlow.emit(false)

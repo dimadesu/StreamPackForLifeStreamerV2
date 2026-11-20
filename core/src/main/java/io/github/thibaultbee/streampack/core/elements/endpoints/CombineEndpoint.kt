@@ -31,12 +31,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combineTransform
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Combines multiple endpoints into one.
@@ -66,12 +69,24 @@ open class CombineEndpoint(
     coroutineDispatcher: CoroutineDispatcher
 ) :
     IEndpointInternal {
-    private val coroutineScope = CoroutineScope(SupervisorJob() + coroutineDispatcher)
+    protected val coroutineScope = CoroutineScope(SupervisorJob() + coroutineDispatcher)
 
     /**
      * Internal map of endpoint streamId to real streamIds
      */
     protected val endpointsToStreamIdsMap = mutableMapOf<Pair<IEndpoint, Int>, Int>()
+
+    /**
+     * Active stream configurations keyed by CombineEndpoint streamId.
+     */
+    protected val activeStreamConfigs = mutableMapOf<Int, CodecConfig>()
+
+    /**
+     * Endpoints that have completed [startStream] and have not been stopped or closed.
+     */
+    protected val startedEndpoints = ConcurrentHashMap.newKeySet<IEndpointInternal>()
+
+    protected val _internalThrowableFlow = MutableStateFlow<Throwable?>(null)
 
     /**
      * List of [IEndpoint]s
@@ -95,6 +110,7 @@ open class CombineEndpoint(
         )
 
     override val throwableFlow: StateFlow<Throwable?> = merge(
+        _internalThrowableFlow,
         *endpointInternals.map { it.throwableFlow }.toTypedArray()
     ).stateIn(
         coroutineScope,
@@ -102,24 +118,47 @@ open class CombineEndpoint(
         initialValue = null
     )
 
+    init {
+        endpointInternals.forEach { endpoint ->
+            coroutineScope.launch {
+                endpoint.isOpenFlow.drop(1).collect { isOpen ->
+                    if (!isOpen && startedEndpoints.remove(endpoint)) {
+                        if (endpoint.throwableFlow.value == null) {
+                            _internalThrowableFlow.emit(ClosedException("Connection lost"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /**
-     * The union of all endpoints' [IEndpoint.IEndpointInfo].
+     * The union of all currently open endpoints' [IEndpoint.IEndpointInfo] (or all endpoints if none are open).
      */
     override val info: IEndpoint.IEndpointInfo
-        get() = endpointInternals.map { it.info }
+        get() = endpointInternals.filter { it.isOpenFlow.value }
+            .ifEmpty { endpointInternals }
+            .map { it.info }
             .reduce { acc, iEndpointInfo -> acc intersect iEndpointInfo }
 
     /**
-     * The union of all endpoints' [IEndpoint.IEndpointInfo].
+     * The union of all endpoints' [IEndpoint.IEndpointInfo] that support [type].
      */
     override fun getInfo(type: MediaDescriptor.Type): IEndpoint.IEndpointInfo {
-        return endpointInternals.map { it.getInfo(type) }
-            .reduce { acc, iEndpointInfo -> acc intersect iEndpointInfo }
+        val infos = endpointInternals.mapNotNull {
+            try {
+                it.getInfo(type)
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        require(infos.isNotEmpty()) { "Unsupported type: $type" }
+        return infos.reduce { acc, iEndpointInfo -> acc intersect iEndpointInfo }
     }
 
     private fun createNewStreamId(): Int {
         var i = 0
-        while (endpointsToStreamIdsMap.keys.any { it.second == i }) {
+        while (activeStreamConfigs.containsKey(i) || endpointsToStreamIdsMap.keys.any { it.second == i }) {
             i++
         }
         return i
@@ -127,7 +166,8 @@ open class CombineEndpoint(
 
     override suspend fun addStream(streamConfig: CodecConfig): Int {
         val streamId = createNewStreamId()
-        endpointInternals.forEach { endpoint ->
+        activeStreamConfigs[streamId] = streamConfig
+        endpointInternals.filter { it.isOpenFlow.value }.forEach { endpoint ->
             endpointsToStreamIdsMap[Pair(endpoint, streamId)] = endpoint.addStream(streamConfig)
         }
         return streamId
@@ -135,15 +175,42 @@ open class CombineEndpoint(
 
     override suspend fun addStreams(streamConfigs: List<CodecConfig>): Map<CodecConfig, Int> {
         val streamIds = mutableMapOf<CodecConfig, Int>()
-        streamConfigs.forEach { streamConfig ->
+        val openEndpoints = endpointInternals.filter { it.isOpenFlow.value }
+        val newEntries = streamConfigs.map { streamConfig ->
             val streamId = createNewStreamId()
-            endpointInternals.forEach { endpoint ->
-                endpointsToStreamIdsMap[Pair(endpoint, streamId)] = endpoint.addStream(streamConfig)
-            }
+            activeStreamConfigs[streamId] = streamConfig
             streamIds[streamConfig] = streamId
+            streamId to streamConfig
+        }
+        openEndpoints.forEach { endpoint ->
+            val addedMap = endpoint.addStreams(newEntries.map { it.second })
+            newEntries.forEach { (streamId, config) ->
+                endpointsToStreamIdsMap[Pair(endpoint, streamId)] =
+                    addedMap[config] ?: throw IllegalStateException("Endpoint did not return stream id for $config")
+            }
         }
         return streamIds
     }
+
+    protected suspend fun ensureEndpointStreamsRegistered(endpoint: IEndpointInternal) {
+        val missingEntries = activeStreamConfigs.entries
+            .filter { (streamId, _) -> endpointsToStreamIdsMap[Pair(endpoint, streamId)] == null }
+        if (missingEntries.isEmpty()) return
+
+        val addedMap = endpoint.addStreams(missingEntries.map { it.value })
+        missingEntries.forEach { (streamId, config) ->
+            endpointsToStreamIdsMap[Pair(endpoint, streamId)] =
+                addedMap[config] ?: throw IllegalStateException("Endpoint did not return stream id for $config")
+        }
+    }
+
+    protected fun clearEndpointStreams(endpoint: IEndpointInternal) {
+        endpointsToStreamIdsMap.keys.filter { it.first == endpoint }.forEach {
+            endpointsToStreamIdsMap.remove(it)
+        }
+    }
+
+    protected open fun isKeepAliveOnWriteError(): Boolean = false
 
     /**
      * Opens the endpoints.
@@ -177,6 +244,7 @@ open class CombineEndpoint(
      * Closes all endpoints
      */
     override suspend fun close() {
+        startedEndpoints.clear()
         endpointInternals.forEach { endpoint ->
             try {
                 endpoint.close()
@@ -187,16 +255,21 @@ open class CombineEndpoint(
     }
 
     /**
-     * Starts all endpoints
+     * Starts all opened endpoints
      */
     override suspend fun startStream() {
-        endpointInternals.forEach { endpoint -> endpoint.startStream() }
+        endpointInternals.filter { it.isOpenFlow.value }.forEach { endpoint ->
+            ensureEndpointStreamsRegistered(endpoint)
+            endpoint.startStream()
+            startedEndpoints.add(endpoint)
+        }
     }
 
     /**
      * Stops all endpoints
      */
     override suspend fun stopStream() {
+        startedEndpoints.clear()
         endpointInternals.forEach { endpoint ->
             try {
                 endpoint.stopStream()
@@ -205,14 +278,23 @@ open class CombineEndpoint(
             }
         }
         endpointsToStreamIdsMap.clear()
+        activeStreamConfigs.clear()
     }
 
     /**
-     * Writes frame to all opened endpoints.
+     * Writes frame to all opened and started endpoints.
      *
-     * If all endpoints write fails, it throws the exception of the first endpoint that failed.
+     * If all endpoints write fails and keep-alive is not active, it throws the exception of the first endpoint that failed.
      */
     override suspend fun write(frame: Frame, streamPid: Int) {
+        val activeEndpoints = endpointInternals.filter {
+            it.isOpenFlow.value && startedEndpoints.contains(it)
+        }
+        if (activeEndpoints.isEmpty()) {
+            frame.close()
+            return
+        }
+
         val throwables = mutableListOf<Throwable>()
 
         /**
@@ -221,19 +303,23 @@ open class CombineEndpoint(
          */
         val deferreds = mutableListOf<Deferred<*>>()
 
-        endpointInternals.filter { it.isOpenFlow.value }.forEach { endpoint ->
+        activeEndpoints.forEach { endpoint ->
+            val deferred = CompletableDeferred<Unit>()
             try {
-                val deferred = CompletableDeferred<Unit>()
+                val endpointStreamId = endpointsToStreamIdsMap[Pair(endpoint, streamPid)]
+                    ?: throw IllegalStateException("Stream id not registered for endpoint $endpoint")
                 val duplicatedFrame = frame.copy(
                     rawBuffer = frame.rawBuffer.duplicate(),
                     onClosed = { deferred.complete(Unit) }
                 )
 
-                val endpointStreamId = endpointsToStreamIdsMap[Pair(endpoint, streamPid)]!!
                 deferreds += deferred
                 endpoint.write(duplicatedFrame, endpointStreamId)
             } catch (t: Throwable) {
-                Logger.e(TAG, "Failed to get stream id for endpoint $endpoint", t)
+                deferred.complete(Unit)
+                Logger.e(TAG, "Failed to write frame for endpoint $endpoint", t)
+                startedEndpoints.remove(endpoint)
+                _internalThrowableFlow.tryEmit(t)
                 throwables += t
             }
         }
@@ -244,7 +330,7 @@ open class CombineEndpoint(
         }
 
         if (throwables.isNotEmpty()) {
-            if (endpoints.none { it.isOpenFlow.value }) {
+            if (!isKeepAliveOnWriteError() && endpoints.none { it.isOpenFlow.value }) {
                 /**
                  * If no endpoint is opened, the exception is thrown directly to stop the pipeline.
                  */

@@ -20,9 +20,17 @@ import android.net.Uri
 import androidx.core.net.toUri
 import io.github.thibaultbee.streampack.core.configuration.mediadescriptor.MediaDescriptor
 import io.github.thibaultbee.streampack.core.configuration.mediadescriptor.UriMediaDescriptor
+import io.github.thibaultbee.streampack.core.elements.metrics.EmptyEndpointMetrics
+import io.github.thibaultbee.streampack.core.elements.metrics.EndpointMetrics
+import io.github.thibaultbee.streampack.core.elements.metrics.WithEndpointMetrics
 import io.github.thibaultbee.streampack.core.pipelines.IDispatcherProvider
 import io.github.thibaultbee.streampack.core.utils.InternalStreamPackApi
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combineTransform
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -40,14 +48,35 @@ import kotlinx.coroutines.sync.withLock
  */
 @OptIn(InternalStreamPackApi::class)
 open class DualEndpoint(
-    private val mainEndpoint: IEndpointInternal,
-    private val secondEndpoint: IEndpointInternal,
+    val mainEndpoint: IEndpointInternal,
+    val secondEndpoint: IEndpointInternal,
     coroutineDispatcher: CoroutineDispatcher
 ) : CombineEndpoint(
     listOf(secondEndpoint, mainEndpoint),
     coroutineDispatcher
-) {
+), WithEndpointMetrics<Any> {
     private val secondMutex = Mutex()
+    private val _isSessionActiveFlow = MutableStateFlow(false)
+
+    override val metrics: EndpointMetrics<Any>
+        get() = (secondEndpoint as? WithEndpointMetrics<Any>)?.metrics
+            ?.takeIf { it !is EmptyEndpointMetrics }
+            ?: (mainEndpoint as? WithEndpointMetrics<Any>)?.metrics
+            ?: EmptyEndpointMetrics
+
+    override val isOpenFlow: StateFlow<Boolean> =
+        combineTransform(
+            _isSessionActiveFlow,
+            *endpointInternals.map { it.isOpenFlow }.toTypedArray()
+        ) { values ->
+            emit(values.any { it })
+        }.stateIn(
+            coroutineScope,
+            SharingStarted.Eagerly,
+            false
+        )
+
+    override fun isKeepAliveOnWriteError(): Boolean = _isSessionActiveFlow.value
 
     /**
      * Opens the [mainEndpoint].
@@ -57,22 +86,50 @@ open class DualEndpoint(
      * @param descriptor the media descriptor
      */
     override suspend fun open(descriptor: MediaDescriptor) {
+        _internalThrowableFlow.value = null
         mainEndpoint.open(descriptor)
     }
 
     /**
-     * Starts the [mainEndpoint].
-     *
-     * You must start the [secondEndpoint] manually.
+     * Starts the opened endpoints ([mainEndpoint] and/or [secondEndpoint]).
      */
     override suspend fun startStream() {
-        mainEndpoint.startStream()
+        require(mainEndpoint.isOpenFlow.value || secondEndpoint.isOpenFlow.value) {
+            "At least one endpoint must be opened before starting stream"
+        }
+        _isSessionActiveFlow.value = true
+        try {
+            if (mainEndpoint.isOpenFlow.value && !startedEndpoints.contains(mainEndpoint)) {
+                ensureEndpointStreamsRegistered(mainEndpoint)
+                mainEndpoint.startStream()
+                startedEndpoints.add(mainEndpoint)
+            }
+            if (secondEndpoint.isOpenFlow.value) {
+                startStreamSecond()
+            }
+        } catch (t: Throwable) {
+            if (startedEndpoints.isEmpty()) {
+                _isSessionActiveFlow.value = false
+            }
+            throw t
+        }
+    }
+
+    override suspend fun stopStream() {
+        _isSessionActiveFlow.value = false
+        super.stopStream()
+    }
+
+    override suspend fun close() {
+        _isSessionActiveFlow.value = false
+        super.close()
     }
 
     /**
      * Opens the [secondEndpoint].
      */
     suspend fun openSecond(descriptor: MediaDescriptor) = secondMutex.withLock {
+        _internalThrowableFlow.value = null
         secondEndpoint.open(descriptor)
     }
 
@@ -80,7 +137,13 @@ open class DualEndpoint(
      * Starts the [secondEndpoint].
      */
     suspend fun startStreamSecond() = secondMutex.withLock {
+        if (startedEndpoints.contains(secondEndpoint) && secondEndpoint.isOpenFlow.value) {
+            return@withLock
+        }
+        _isSessionActiveFlow.value = true
+        ensureEndpointStreamsRegistered(secondEndpoint)
         secondEndpoint.startStream()
+        startedEndpoints.add(secondEndpoint)
     }
 
     /**
@@ -90,10 +153,19 @@ open class DualEndpoint(
      */
     suspend fun startStreamSecond(descriptor: MediaDescriptor) = secondMutex.withLock {
         try {
+            _internalThrowableFlow.value = null
             secondEndpoint.open(descriptor)
+            _isSessionActiveFlow.value = true
+            ensureEndpointStreamsRegistered(secondEndpoint)
             secondEndpoint.startStream()
+            startedEndpoints.add(secondEndpoint)
         } catch (e: Exception) {
+            startedEndpoints.remove(secondEndpoint)
+            if (startedEndpoints.isEmpty()) {
+                _isSessionActiveFlow.value = false
+            }
             secondEndpoint.close()
+            clearEndpointStreams(secondEndpoint)
             throw e
         }
     }
@@ -102,17 +174,18 @@ open class DualEndpoint(
      * Stops the [secondEndpoint].
      */
     suspend fun stopStreamSecond() = secondMutex.withLock {
+        startedEndpoints.remove(secondEndpoint)
         secondEndpoint.stopStream()
-        endpointsToStreamIdsMap.keys.filter { it.first == secondEndpoint }.forEach {
-            endpointsToStreamIdsMap.remove(it)
-        }
+        clearEndpointStreams(secondEndpoint)
     }
 
     /**
      * Closes the [secondEndpoint].
      */
     suspend fun closeSecond() = secondMutex.withLock {
+        startedEndpoints.remove(secondEndpoint)
         secondEndpoint.close()
+        clearEndpointStreams(secondEndpoint)
     }
 }
 
