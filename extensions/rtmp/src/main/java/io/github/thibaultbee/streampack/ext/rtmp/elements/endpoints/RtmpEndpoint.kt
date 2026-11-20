@@ -176,6 +176,14 @@ class RtmpEndpoint internal constructor(
     override suspend fun open(descriptor: MediaDescriptor) =
         open(RtmpMediaDescriptor(descriptor))
 
+    private suspend fun resetStreamState() {
+        flvTagChannel.clear()
+        flvTagBuilder.clearStreams()
+        timestampMutex.withLock {
+            startUpTimestamp = INVALID_TIMESTAMP
+        }
+    }
+
     private suspend fun open(descriptor: RtmpMediaDescriptor) {
         withContext(ioDispatcher) {
             mutex.withLock {
@@ -185,6 +193,9 @@ class RtmpEndpoint internal constructor(
                 }
 
                 resetMetrics()
+                _throwableFlow.emit(null)
+                resetStreamState()
+
                 val client = kotlinx.coroutines.withTimeoutOrNull(10000L) {
                     if (descriptor.connectInfo != null) {
                         connectionBuilder.connect(
@@ -203,25 +214,37 @@ class RtmpEndpoint internal constructor(
                 rtmpClient = client.apply {
                     _isOpenFlow.emit(true)
 
+                    val closedClient = this
                     socketContext.invokeOnCompletion { throwable ->
-                        rtmpClient = null
-                        isStarted = false
-
-                        _isOpenFlow.tryEmit(false)
-                        if (throwable != null) {
-                            Logger.e(TAG, "RTMP connection closed with error: $throwable")
-                            if (throwable !is EOFException) {
-                                _throwableFlow.tryEmit(ClosedException(throwable))
-                            } else {
-                                _throwableFlow.tryEmit(
-                                    ClosedException(
-                                        "Connection lost",
-                                        IOException(throwable)
-                                    )
-                                )
+                        val isCurrentClient = rtmpClient === closedClient
+                        if (isCurrentClient) {
+                            rtmpClient = null
+                            isStarted = false
+                            _isOpenFlow.tryEmit(false)
+                        }
+                        coroutineScope.launch {
+                            mutex.withLock {
+                                if (rtmpClient == null) {
+                                    resetStreamState()
+                                }
                             }
-                        } else {
-                            Logger.i(TAG, "RTMP connection closed")
+                        }
+                        if (isCurrentClient) {
+                            if (throwable != null) {
+                                Logger.e(TAG, "RTMP connection closed with error: $throwable")
+                                if (throwable !is EOFException) {
+                                    _throwableFlow.tryEmit(ClosedException(throwable))
+                                } else {
+                                    _throwableFlow.tryEmit(
+                                        ClosedException(
+                                            "Connection lost",
+                                            IOException(throwable)
+                                        )
+                                    )
+                                }
+                            } else {
+                                Logger.i(TAG, "RTMP connection closed")
+                            }
                         }
                     }
                 }
@@ -306,10 +329,8 @@ class RtmpEndpoint internal constructor(
         } catch (t: Throwable) {
             Logger.w(TAG, "Error while stopping stream: $t")
         } finally {
-            flvTagChannel.clear()
-            flvTagBuilder.clearStreams()
-            timestampMutex.withLock {
-                startUpTimestamp = INVALID_TIMESTAMP
+            mutex.withLock {
+                resetStreamState()
             }
         }
     }
@@ -317,16 +338,19 @@ class RtmpEndpoint internal constructor(
     override suspend fun close() {
         isStarted = false
         mutex.withLock {
+            val clientToClose = rtmpClient
+            rtmpClient = null
             try {
                 val closed = kotlinx.coroutines.withTimeoutOrNull(2000L) {
-                    rtmpClient?.close()
+                    clientToClose?.close()
                     true
                 }
                 if (closed == null) {
                     Logger.w(TAG, "RTMP socket close timeout after 2 seconds - forcing close")
                 }
             } finally {
-                rtmpClient = null
+                _isOpenFlow.emit(false)
+                resetStreamState()
             }
         }
     }
