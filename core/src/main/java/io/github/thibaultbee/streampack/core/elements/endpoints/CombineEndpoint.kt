@@ -123,13 +123,21 @@ open class CombineEndpoint(
             coroutineScope.launch {
                 endpoint.isOpenFlow.drop(1).collect { isOpen ->
                     if (!isOpen && startedEndpoints.remove(endpoint)) {
-                        if (endpoint.throwableFlow.value == null) {
-                            _internalThrowableFlow.emit(ClosedException("Connection lost"))
-                        }
+                        onChildUnexpectedClose(endpoint)
                     }
                 }
             }
         }
+    }
+
+    protected open suspend fun onChildUnexpectedClose(endpoint: IEndpointInternal) {
+        if (endpoint.throwableFlow.value == null) {
+            _internalThrowableFlow.emit(ClosedException("Connection lost"))
+        }
+    }
+
+    protected open fun onChildWriteError(endpoint: IEndpointInternal, throwable: Throwable) {
+        _internalThrowableFlow.tryEmit(throwable)
     }
 
     /**
@@ -319,7 +327,7 @@ open class CombineEndpoint(
                 deferred.complete(Unit)
                 Logger.e(TAG, "Failed to write frame for endpoint $endpoint", t)
                 startedEndpoints.remove(endpoint)
-                _internalThrowableFlow.tryEmit(t)
+                onChildWriteError(endpoint, t)
                 throwables += t
             }
         }

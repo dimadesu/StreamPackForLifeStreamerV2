@@ -69,7 +69,8 @@ sealed class FlvEndpoint(
     private val _isOpenFlow = MutableStateFlow(false)
     override val isOpenFlow: StateFlow<Boolean> = _isOpenFlow.asStateFlow()
 
-    override val throwableFlow: StateFlow<Throwable?> = MutableStateFlow(null).asStateFlow()
+    private val _throwableFlow = MutableStateFlow<Throwable?>(null)
+    override val throwableFlow: StateFlow<Throwable?> = _throwableFlow.asStateFlow()
 
     override val info = EndpointInfo(FlvMuxerInfo)
 
@@ -82,6 +83,7 @@ sealed class FlvEndpoint(
                     write(flvTag)
                 } catch (t: Throwable) {
                     Logger.e(TAG, "Error while writing FLV data: $t")
+                    _throwableFlow.tryEmit(t)
                 }
             }
         }
@@ -100,6 +102,7 @@ sealed class FlvEndpoint(
                 Logger.w(TAG, "Already opened")
                 return
             }
+            _throwableFlow.value = null
             flvMuxer = openImpl(descriptor)
             _isOpenFlow.emit(true)
         }

@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combineTransform
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -55,8 +56,10 @@ open class DualEndpoint(
     listOf(secondEndpoint, mainEndpoint),
     coroutineDispatcher
 ), WithEndpointMetrics<Any> {
+    private val mainMutex = Mutex()
     private val secondMutex = Mutex()
     private val _isSessionActiveFlow = MutableStateFlow(false)
+    private val _mainInternalThrowableFlow = MutableStateFlow<Throwable?>(null)
 
     override val metrics: EndpointMetrics<Any>
         get() = (secondEndpoint as? WithEndpointMetrics<Any>)?.metrics
@@ -76,7 +79,50 @@ open class DualEndpoint(
             false
         )
 
+    /**
+     * Throwable flow scoped to [secondEndpoint] (e.g., remote connection drops) so local
+     * [mainEndpoint] errors do not masquerade as remote disconnections.
+     */
+    override val throwableFlow: StateFlow<Throwable?> = merge(
+        _internalThrowableFlow,
+        secondEndpoint.throwableFlow
+    ).stateIn(
+        coroutineScope,
+        started = SharingStarted.Eagerly,
+        initialValue = null
+    )
+
+    /**
+     * Throwable flow scoped to [mainEndpoint] (e.g., local storage write errors).
+     */
+    val mainThrowableFlow: StateFlow<Throwable?> = merge(
+        _mainInternalThrowableFlow,
+        mainEndpoint.throwableFlow
+    ).stateIn(
+        coroutineScope,
+        started = SharingStarted.Eagerly,
+        initialValue = null
+    )
+
     override fun isKeepAliveOnWriteError(): Boolean = _isSessionActiveFlow.value
+
+    override suspend fun onChildUnexpectedClose(endpoint: IEndpointInternal) {
+        if (endpoint === mainEndpoint) {
+            if (endpoint.throwableFlow.value == null) {
+                _mainInternalThrowableFlow.emit(ClosedException("Local endpoint closed unexpectedly"))
+            }
+        } else {
+            super.onChildUnexpectedClose(endpoint)
+        }
+    }
+
+    override fun onChildWriteError(endpoint: IEndpointInternal, throwable: Throwable) {
+        if (endpoint === mainEndpoint) {
+            _mainInternalThrowableFlow.tryEmit(throwable)
+        } else {
+            super.onChildWriteError(endpoint, throwable)
+        }
+    }
 
     /**
      * Opens the [mainEndpoint].
@@ -85,7 +131,8 @@ open class DualEndpoint(
      *
      * @param descriptor the media descriptor
      */
-    override suspend fun open(descriptor: MediaDescriptor) {
+    override suspend fun open(descriptor: MediaDescriptor) = mainMutex.withLock {
+        _mainInternalThrowableFlow.value = null
         _internalThrowableFlow.value = null
         mainEndpoint.open(descriptor)
     }
@@ -99,10 +146,12 @@ open class DualEndpoint(
         }
         _isSessionActiveFlow.value = true
         try {
-            if (mainEndpoint.isOpenFlow.value && !startedEndpoints.contains(mainEndpoint)) {
-                ensureEndpointStreamsRegistered(mainEndpoint)
-                mainEndpoint.startStream()
-                startedEndpoints.add(mainEndpoint)
+            mainMutex.withLock {
+                if (mainEndpoint.isOpenFlow.value && !startedEndpoints.contains(mainEndpoint)) {
+                    ensureEndpointStreamsRegistered(mainEndpoint)
+                    mainEndpoint.startStream()
+                    startedEndpoints.add(mainEndpoint)
+                }
             }
             if (secondEndpoint.isOpenFlow.value) {
                 startStreamSecond()
@@ -123,6 +172,24 @@ open class DualEndpoint(
     override suspend fun close() {
         _isSessionActiveFlow.value = false
         super.close()
+    }
+
+    /**
+     * Stops the [mainEndpoint] without affecting [secondEndpoint].
+     */
+    suspend fun stopStreamMain() = mainMutex.withLock {
+        startedEndpoints.remove(mainEndpoint)
+        mainEndpoint.stopStream()
+        clearEndpointStreams(mainEndpoint)
+    }
+
+    /**
+     * Closes the [mainEndpoint] without affecting [secondEndpoint].
+     */
+    suspend fun closeMain() = mainMutex.withLock {
+        startedEndpoints.remove(mainEndpoint)
+        mainEndpoint.close()
+        clearEndpointStreams(mainEndpoint)
     }
 
     /**
