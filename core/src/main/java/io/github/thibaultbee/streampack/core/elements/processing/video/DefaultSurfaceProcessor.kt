@@ -90,8 +90,8 @@ private class DefaultSurfaceProcessor(
     private var transitionStartTimeNs: Long = 0L
     private var lastBlurStepTimeNs: Long = 0L
     private var transitionReferenceTargetRotation: Int = Surface.ROTATION_0
-    private var transitionReferenceWasMirrored: Boolean = false
-    private var transitionSourceIsMirror: Boolean = false
+    private var transitionPreviewTargetRotation: Int = Surface.ROTATION_0
+    private var transitionHasSeparatePreviewFbo: Boolean = false
     private var incomingPrimarySurface: Surface? = null
     private val cfrFrameIntervalNs = if (cfrFps > 0) 1_000_000_000L / cfrFps else 0L
     private var nextFrameTimeNs = 0L
@@ -413,38 +413,57 @@ private class DefaultSurfaceProcessor(
         }
     }
 
+    private fun buildTransitionInputsForOutput(
+        output: SurfaceOutput,
+        resolver: IInputResolver?,
+        hasUnmirroredOutput: Boolean
+    ): List<OpenGlRenderer.RenderInput> {
+        return if (resolver == null) {
+            val primaryInput = surfaceInputs.firstOrNull { it.hasFrame } ?: return emptyList()
+            val rawTransform = surfaceInputsToMatrixMap[primaryInput.surfaceTexture] ?: textureMatrix
+            val outMatrix = FloatArray(16)
+            output.updateTransformMatrix(outMatrix, rawTransform)
+            listOf(OpenGlRenderer.RenderInput(primaryInput.textureId, outMatrix))
+        } else {
+            compositor.buildRenderInputs(
+                surfaceInputs = surfaceInputs,
+                surfaceInputsToMatrixMap = surfaceInputsToMatrixMap,
+                output = output,
+                resolver = resolver,
+                hasUnmirroredOutput = hasUnmirroredOutput
+            )
+        }
+    }
+
     private fun captureLastFrameForTransition() {
         if (!hasFirstFrame || surfaceInputs.none { it.hasFrame }) return
+        val typedOutputs = surfaceOutputs.filterIsInstance<SurfaceOutput>()
         val referenceOutput = selectSnapshotSurface(surfaceOutputs) as? SurfaceOutput ?: return
         val viewport = referenceOutput.viewportRect
         val viewportSize = Size(viewport.width(), viewport.height())
         if (viewportSize.width <= 0 || viewportSize.height <= 0) return
 
         val resolver = inputResolver
-        val inputs = if (resolver == null) {
-            val primaryInput = surfaceInputs.firstOrNull { it.hasFrame } ?: return
-            val rawTransform = surfaceInputsToMatrixMap[primaryInput.surfaceTexture] ?: textureMatrix
-            val outMatrix = FloatArray(16)
-            referenceOutput.updateTransformMatrix(outMatrix, rawTransform)
-            listOf(OpenGlRenderer.RenderInput(primaryInput.textureId, outMatrix))
-        } else {
-            val typedOutputs = surfaceOutputs.filterIsInstance<SurfaceOutput>()
-            val hasUnmirrored = typedOutputs.any { !it.needMirroring }
-            compositor.buildRenderInputs(
-                surfaceInputs = surfaceInputs,
-                surfaceInputsToMatrixMap = surfaceInputsToMatrixMap,
-                output = referenceOutput,
-                resolver = resolver,
-                hasUnmirroredOutput = hasUnmirrored
-            )
-        }
+        val hasUnmirrored = typedOutputs.any { !it.needMirroring }
+        val inputs = buildTransitionInputsForOutput(referenceOutput, resolver, hasUnmirrored)
         if (inputs.isEmpty()) return
 
+        // If there is a distinct preview output (e.g. front camera or dual camera where the preview
+        // is mirrored while the stream output is unmirrored), capture its exact preview transform
+        // into a separate preview FBO so the preview stays mirrored during the blur transition.
+        val previewOutput = typedOutputs.firstOrNull { it.isPreviewOutput }
+        val previewInputs = if (previewOutput != null && previewOutput !== referenceOutput) {
+            buildTransitionInputsForOutput(previewOutput, resolver, hasUnmirrored)
+                .takeIf { it.isNotEmpty() }
+        } else {
+            null
+        }
+
         transitionReferenceTargetRotation = referenceOutput.targetRotation
-        transitionReferenceWasMirrored = referenceOutput.needMirroring
-        transitionSourceIsMirror = referenceOutput.isSourceMirrored
+        transitionPreviewTargetRotation = previewOutput?.targetRotation ?: referenceOutput.targetRotation
+        transitionHasSeparatePreviewFbo = previewInputs != null
         try {
-            renderer.captureTransitionFrame(inputs, viewportSize)
+            renderer.captureTransitionFrame(inputs, viewportSize, previewInputs)
         } catch (t: Throwable) {
             Logger.w(TAG, "Failed to capture transition frame: ${t.message}")
         }
@@ -639,15 +658,19 @@ private class DefaultSurfaceProcessor(
         surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach { output ->
             try {
                 if (output.isStreaming()) {
-                    val shouldMirrorOutput = output.isPreviewOutput && transitionSourceIsMirror
-                    val mirrorRelativeToFbo = shouldMirrorOutput != transitionReferenceWasMirrored
-                    val refRotDeg = OrientationUtils.getSurfaceRotationDegrees(transitionReferenceTargetRotation)
+                    val usePreviewFbo = output.isPreviewOutput && transitionHasSeparatePreviewFbo
+                    val baseTargetRotation = if (usePreviewFbo) {
+                        transitionPreviewTargetRotation
+                    } else {
+                        transitionReferenceTargetRotation
+                    }
+                    val refRotDeg = OrientationUtils.getSurfaceRotationDegrees(baseTargetRotation)
                     val outRotDeg = OrientationUtils.getSurfaceRotationDegrees(output.targetRotation)
                     val relativeRotationDegrees = (refRotDeg - outRotDeg + 360) % 360
                     renderer.renderTransitionFrame(
                         timestampNs = renderTimestampNs,
                         surface = output.targetSurface,
-                        mirrorHorizontally = mirrorRelativeToFbo,
+                        usePreviewTransitionFrame = usePreviewFbo,
                         relativeRotationDegrees = relativeRotationDegrees,
                         extraBlurRadius = extraBlurRadius,
                         isMuted = isMuted
