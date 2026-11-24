@@ -43,7 +43,8 @@ fun SurfaceOutput(
         isStreaming,
         sourceResolution,
         needMirroring,
-        sourceInfoProvider
+        sourceInfoProvider,
+        onRequestKeyFrame = descriptor.onRequestKeyFrame
     )
 
 class SurfaceOutput(
@@ -54,7 +55,8 @@ class SurfaceOutput(
     sourceResolution: Size,
     val needMirroring: Boolean,
     sourceInfoProvider: ISourceInfoProvider,
-    val isPreviewOutput: Boolean = false
+    val isPreviewOutput: Boolean = false,
+    val onRequestKeyFrame: () -> Unit = {}
 ) :
     ISurfaceOutput {
     override val type = ISurfaceOutput.OutputType.INTERNAL

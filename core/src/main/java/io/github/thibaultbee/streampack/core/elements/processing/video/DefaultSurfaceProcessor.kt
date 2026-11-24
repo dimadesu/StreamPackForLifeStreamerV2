@@ -40,6 +40,9 @@ import io.github.thibaultbee.streampack.core.pipelines.DispatcherProvider.Compan
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
 import io.github.thibaultbee.streampack.core.pipelines.utils.HandlerThreadExecutor
 import io.github.thibaultbee.streampack.core.utils.InternalStreamPackApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
@@ -75,9 +78,16 @@ private class DefaultSurfaceProcessor(
     @Volatile private var latestTimestampNs: Long = 0L
     @Volatile private var hasFirstFrame: Boolean = false
     private var isRenderLoopRunning = false
+    private val _isTransitioningFlow = MutableStateFlow(false)
+    override val isTransitioningFlow: StateFlow<Boolean> = _isTransitioningFlow.asStateFlow()
     @Volatile private var isTransitioning: Boolean = false
+        set(value) {
+            field = value
+            _isTransitioningFlow.value = value
+        }
     private var transitionIntervalNs: Long = 0L
     private var transitionStartTimeNs: Long = 0L
+    private var lastBlurStepTimeNs: Long = 0L
     private var transitionReferenceWasMirrored: Boolean = false
     private var transitionSourceIsMirror: Boolean = false
     private var incomingPrimarySurface: Surface? = null
@@ -378,6 +388,7 @@ private class DefaultSurfaceProcessor(
             if (!isTransitioning) {
                 captureLastFrameForTransition()
                 transitionStartTimeNs = System.nanoTime()
+                lastBlurStepTimeNs = transitionStartTimeNs
             }
             isTransitioning = true
             hasFirstFrame = false
@@ -540,13 +551,21 @@ private class DefaultSurfaceProcessor(
             latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
             hasFirstFrame = true
 
-            if (isTransitioning) {
+            val wasTransitioning = isTransitioning
+            if (wasTransitioning) {
                 stopTransitionInternal()
             }
 
             if (cfrFps == 0) {
                 // Standard event-driven render
                 renderLatestFrame()
+            }
+
+            if (wasTransitioning) {
+                // Request an immediate sync/keyframe on streaming video encoders so the first
+                // sharp frame after the blur transition is encoded as an I-frame instead of a
+                // high-QP P-frame predicted from the blurred transition frame.
+                requestKeyFrameOnStreamingOutputs()
             }
         }
 
@@ -600,12 +619,19 @@ private class DefaultSurfaceProcessor(
 
     private fun renderTransitionFrame(renderTimestampNs: Long) {
         val elapsedSec = ((renderTimestampNs - transitionStartTimeNs).coerceAtLeast(0L)) / 1_000_000_000f
-        if (!isMuted && renderer.hasTransitionFrame && elapsedSec <= BLUR_RAMP_DURATION_SEC) {
-            // Progressive blur ramp (Moblin-style: grows over the first 2 seconds, then freezes)
+        if (!isMuted &&
+            renderer.hasTransitionFrame &&
+            elapsedSec <= BLUR_RAMP_DURATION_SEC &&
+            (renderTimestampNs - lastBlurStepTimeNs) >= BLUR_STEP_INTERVAL_NS
+        ) {
+            // Progressive blur ramp (Moblin-style: 15 -> 45 at 1080p over the first 2 seconds,
+            // stepped at ~10 Hz so fast 300ms switches stay moderately blurred while slower
+            // 1-2s switches smoothly deepen).
+            lastBlurStepTimeNs = renderTimestampNs
             val progress = (elapsedSec / BLUR_RAMP_DURATION_SEC).coerceIn(0f, 1f)
-            renderer.stepTransitionBlur(0.8f + progress * 1.4f)
+            renderer.stepTransitionBlur(0.45f + progress * 0.45f)
         }
-        val extraBlurRadius = 1.0f + (elapsedSec / BLUR_RAMP_DURATION_SEC).coerceIn(0f, 1f) * 1.5f
+        val extraBlurRadius = 0.6f + (elapsedSec / BLUR_RAMP_DURATION_SEC).coerceIn(0f, 1f) * 1.1f
 
         surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach { output ->
             try {
@@ -622,6 +648,18 @@ private class DefaultSurfaceProcessor(
                 }
             } catch (t: Throwable) {
                 Logger.e(TAG, "Error while rendering transition frame", t)
+            }
+        }
+    }
+
+    private fun requestKeyFrameOnStreamingOutputs() {
+        surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach { output ->
+            try {
+                if (!output.isPreviewOutput && output.isStreaming()) {
+                    output.onRequestKeyFrame()
+                }
+            } catch (t: Throwable) {
+                Logger.w(TAG, "Failed to request keyframe on output: ${t.message}")
             }
         }
     }
@@ -755,6 +793,7 @@ private class DefaultSurfaceProcessor(
         private const val TRANSITION_TIMEOUT_MS = 3000L
         private const val MIN_TRANSITION_HOLD_NS = 300_000_000L // 300ms (matches Moblin's 0.3s default)
         private const val BLUR_RAMP_DURATION_SEC = 2.0f
+        private const val BLUR_STEP_INTERVAL_NS = 100_000_000L // 100ms (~10 Hz iterative FBO steps)
     }
 
     private data class PendingSnapshot(

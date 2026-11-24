@@ -163,12 +163,14 @@ interface IConfigurableVideoPipelineOutputInternal : IConfigurableVideoPipelineO
  * @param resolution The resolution of the [Surface].
  * @param targetRotation The target rotation in [Surface] rotation ([Surface.ROTATION_0], ...).
  * @param isEncoderInputSurface Whether the [Surface] is used as an input for a video encoder.
+ * @param onRequestKeyFrame Optional callback to request an immediate sync/keyframe on the encoder.
  */
 data class SurfaceDescriptor(
     val surface: Surface,
     val resolution: Size,
     @RotationValue val targetRotation: Int = 0,
-    val isEncoderInputSurface: Boolean = false
+    val isEncoderInputSurface: Boolean = false,
+    val onRequestKeyFrame: () -> Unit = {}
 )
 
 /**

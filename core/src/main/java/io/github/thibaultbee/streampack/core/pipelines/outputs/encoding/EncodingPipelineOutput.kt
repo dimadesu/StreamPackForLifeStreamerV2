@@ -579,7 +579,14 @@ internal class EncodingPipelineOutput(
                                     surface,
                                     videoConfig.resolution,
                                     targetRotation,
-                                    true
+                                    true,
+                                    onRequestKeyFrame = {
+                                        try {
+                                            videoEncoder.requestKeyFrame()
+                                        } catch (t: Throwable) {
+                                            Logger.w(TAG, "Failed to request keyframe on transition end: ${t.message}")
+                                        }
+                                    }
                                 )
                             )
                         }

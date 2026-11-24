@@ -127,7 +127,13 @@ internal constructor(
     override fun requestKeyFrame() {
         val bundle = Bundle()
         bundle.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-        mediaCodec.setParameters(bundle)
+        try {
+            mediaCodec.setParameters(bundle)
+        } catch (e: CodecException) {
+            Logger.w(tag, "Failed to request key frame: ${e.message}")
+        } catch (e: IllegalStateException) {
+            Logger.w(tag, "Failed to request key frame (codec not in running state): ${e.message}")
+        }
     }
 
     /**

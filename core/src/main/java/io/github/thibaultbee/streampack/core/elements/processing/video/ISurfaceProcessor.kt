@@ -26,6 +26,8 @@ import io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRang
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
 import io.github.thibaultbee.streampack.core.utils.InternalStreamPackApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 interface ISurfaceProcessor {
     /**
@@ -33,6 +35,12 @@ interface ISurfaceProcessor {
      * The video stream will be replaced by a black screen.
      */
     var isMuted: Boolean
+
+    /**
+     * StateFlow indicating whether a video source switch transition is currently active.
+     */
+    val isTransitioningFlow: StateFlow<Boolean>
+        get() = NO_OP_TRANSITIONING_FLOW
 
     /**
      * Factory interface for creating instances of [ISurfaceProcessor].
@@ -44,6 +52,10 @@ interface ISurfaceProcessor {
             dynamicRangeProfile: DynamicRangeProfile,
             dispatcherProvider: IVideoDispatcherProvider
         ): ISurfaceProcessorInternal
+    }
+
+    companion object {
+        private val NO_OP_TRANSITIONING_FLOW: StateFlow<Boolean> = MutableStateFlow(false)
     }
 }
 

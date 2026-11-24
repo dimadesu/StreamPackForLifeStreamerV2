@@ -767,10 +767,11 @@ class OpenGlRenderer {
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-        // Apply initial ping-pong blur passes so the very first transition frame already has
-        // Moblin's base blur radius (~15px at 1080p).
+        // Apply a single initial ping-pong blur pass so the first transition frame starts
+        // at Moblin's moderate base blur radius (~15px at 1080p / ~2.8px at 360p) instead of
+        // immediately wiping out all spatial gradients on short switches.
         repeat(INITIAL_BLUR_PING_PONG_PASSES) { pass ->
-            stepTransitionBlur(1.2f + pass * 0.6f)
+            stepTransitionBlur(1.0f + pass * 0.4f)
         }
 
         mCurrentProgram = null
@@ -1154,6 +1155,6 @@ class OpenGlRenderer {
     companion object {
         private const val TAG = "OpenGlRenderer"
         private const val TRANSITION_FBO_MAX_DIM = 360
-        private const val INITIAL_BLUR_PING_PONG_PASSES = 3
+        private const val INITIAL_BLUR_PING_PONG_PASSES = 1
     }
 }
