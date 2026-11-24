@@ -30,6 +30,7 @@ import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.S
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.extensions.preRotate
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.extensions.preVerticalFlip
+import io.github.thibaultbee.streampack.core.elements.utils.OrientationUtils
 import io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRangeProfile
 import io.github.thibaultbee.streampack.core.elements.utils.extensions.rotate
 import io.github.thibaultbee.streampack.core.elements.utils.time.TimeUtils
@@ -88,6 +89,7 @@ private class DefaultSurfaceProcessor(
     private var transitionIntervalNs: Long = 0L
     private var transitionStartTimeNs: Long = 0L
     private var lastBlurStepTimeNs: Long = 0L
+    private var transitionReferenceTargetRotation: Int = Surface.ROTATION_0
     private var transitionReferenceWasMirrored: Boolean = false
     private var transitionSourceIsMirror: Boolean = false
     private var incomingPrimarySurface: Surface? = null
@@ -438,6 +440,7 @@ private class DefaultSurfaceProcessor(
         }
         if (inputs.isEmpty()) return
 
+        transitionReferenceTargetRotation = referenceOutput.targetRotation
         transitionReferenceWasMirrored = referenceOutput.needMirroring
         transitionSourceIsMirror = referenceOutput.isSourceMirrored
         try {
@@ -638,10 +641,14 @@ private class DefaultSurfaceProcessor(
                 if (output.isStreaming()) {
                     val shouldMirrorOutput = output.isPreviewOutput && transitionSourceIsMirror
                     val mirrorRelativeToFbo = shouldMirrorOutput != transitionReferenceWasMirrored
+                    val refRotDeg = OrientationUtils.getSurfaceRotationDegrees(transitionReferenceTargetRotation)
+                    val outRotDeg = OrientationUtils.getSurfaceRotationDegrees(output.targetRotation)
+                    val relativeRotationDegrees = (refRotDeg - outRotDeg + 360) % 360
                     renderer.renderTransitionFrame(
                         timestampNs = renderTimestampNs,
                         surface = output.targetSurface,
                         mirrorHorizontally = mirrorRelativeToFbo,
+                        relativeRotationDegrees = relativeRotationDegrees,
                         extraBlurRadius = extraBlurRadius,
                         isMuted = isMuted
                     )
@@ -822,8 +829,10 @@ class DefaultSurfaceProcessorFactory(private val cfrFps: Int = 0) :
 @OptIn(InternalStreamPackApi::class)
 internal fun selectSnapshotSurface(surfaceOutputs: List<ISurfaceOutput>): ISurfaceOutput? {
     val typedOutputs = surfaceOutputs.filterIsInstance<SurfaceOutput>()
-    return typedOutputs.filter { !it.needMirroring }
+    val activeOutputs = typedOutputs.filter { it.isStreaming() }
+    val candidates = activeOutputs.ifEmpty { typedOutputs }
+    return candidates.filter { !it.needMirroring }
         .maxByOrNull { it.targetResolution.width * it.targetResolution.height }
-        ?: typedOutputs.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
+        ?: candidates.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
         ?: surfaceOutputs.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
 }

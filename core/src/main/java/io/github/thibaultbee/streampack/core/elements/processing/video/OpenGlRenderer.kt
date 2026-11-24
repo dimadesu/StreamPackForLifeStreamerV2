@@ -62,6 +62,7 @@ import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLU
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.glVersionNumber
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GraphicDeviceInfo
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.OutputSurface
+import io.github.thibaultbee.streampack.core.elements.processing.video.utils.extensions.preRotate
 import io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRangeProfile
 import io.github.thibaultbee.streampack.core.logger.Logger
 import java.nio.ByteBuffer
@@ -104,11 +105,7 @@ class OpenGlRenderer {
     private var mTransitionHeight = 0
     private var mTransitionSourceAspectRatio = 0f
     private var mHasTransitionFrame = false
-    private val mMirroredTransitionTexMatrix = FloatArray(16).apply {
-        Matrix.setIdentityM(this, 0)
-        Matrix.translateM(this, 0, 1f, 0f, 0f)
-        Matrix.scaleM(this, 0, -1f, 1f, 1f)
-    }
+    private val mTransitionTexMatrix = FloatArray(16)
 
     val hasTransitionFrame: Boolean
         get() = mHasTransitionFrame
@@ -828,6 +825,7 @@ class OpenGlRenderer {
         timestampNs: Long,
         surface: Surface,
         mirrorHorizontally: Boolean = false,
+        relativeRotationDegrees: Int = 0,
         extraBlurRadius: Float = 1.0f,
         isMuted: Boolean = false
     ) {
@@ -863,16 +861,32 @@ class OpenGlRenderer {
         GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-        // Compute aspect-preserving viewport from captured transition source aspect ratio
-        val viewport = computeTransitionViewport(targetW, targetH, mTransitionSourceAspectRatio)
+        // Compute aspect-preserving viewport from captured transition source aspect ratio,
+        // swapping width/height ratio if this output's targetRotation differs by 90/270 deg
+        // from the reference output used to capture the transition FBO.
+        val normalizedRot = ((relativeRotationDegrees % 360) + 360) % 360
+        val effectiveSourceRatio = if (
+            (normalizedRot == 90 || normalizedRot == 270) && mTransitionSourceAspectRatio > 0f
+        ) {
+            1f / mTransitionSourceAspectRatio
+        } else {
+            mTransitionSourceAspectRatio
+        }
+        val viewport = computeTransitionViewport(targetW, targetH, effectiveSourceRatio)
         GLES20.glViewport(viewport.left, viewport.top, viewport.width(), viewport.height())
 
         val blurProgram = requireNotNull(mBlurProgram)
         blurProgram.use()
         mCurrentProgram = blurProgram
-        blurProgram.updateTextureMatrix(
-            if (mirrorHorizontally) mMirroredTransitionTexMatrix else IDENTITY_MATRIX
-        )
+        Matrix.setIdentityM(mTransitionTexMatrix, 0)
+        if (normalizedRot != 0) {
+            mTransitionTexMatrix.preRotate(normalizedRot.toFloat(), 0.5f, 0.5f)
+        }
+        if (mirrorHorizontally) {
+            Matrix.translateM(mTransitionTexMatrix, 0, 1f, 0f, 0f)
+            Matrix.scaleM(mTransitionTexMatrix, 0, -1f, 1f, 1f)
+        }
+        blurProgram.updateTextureMatrix(mTransitionTexMatrix)
         blurProgram.updateTexelOffset(
             extraBlurRadius / mTransitionWidth.toFloat(),
             extraBlurRadius / mTransitionHeight.toFloat()

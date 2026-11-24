@@ -22,17 +22,36 @@ class DefaultSurfaceProcessorSnapshotTest {
 
     private fun createSurfaceOutput(
         resolution: Size,
-        needMirroring: Boolean
+        needMirroring: Boolean,
+        isStreaming: Boolean = true
     ): SurfaceOutput {
         return SurfaceOutput(
             targetSurface = mockk<Surface>(relaxed = true),
             targetResolution = resolution,
             targetRotation = Surface.ROTATION_0,
-            isStreaming = { true },
+            isStreaming = { isStreaming },
             sourceResolution = Size(1920, 1080),
             needMirroring = needMirroring,
             sourceInfoProvider = infoProvider
         )
+    }
+
+    @Test
+    fun `selectSnapshotSurface prefers active preview output over inactive stale encoder output`() {
+        val inactiveLandscapeEncoder = createSurfaceOutput(
+            Size(1920, 1080),
+            needMirroring = false,
+            isStreaming = false
+        )
+        val activePortraitPreview = createSurfaceOutput(
+            Size(1080, 1920),
+            needMirroring = true,
+            isStreaming = true
+        )
+
+        val selected = selectSnapshotSurface(listOf(inactiveLandscapeEncoder, activePortraitPreview))
+
+        assertSame(activePortraitPreview, selected)
     }
 
     @Test
