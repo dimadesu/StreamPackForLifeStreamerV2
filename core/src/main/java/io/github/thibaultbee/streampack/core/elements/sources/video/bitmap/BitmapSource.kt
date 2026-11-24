@@ -191,7 +191,7 @@ internal class BitmapSource(
         synchronized(drawLock) {
             val isNeeded = (isStreamRequested || isPreviewRequested) && outputSurface != null
             if (isNeeded && (outputScheduler == null || outputScheduler?.isDone == true)) {
-                val fps = (videoSourceConfig?.fps ?: 15).coerceAtLeast(1)
+                val fps = (videoSourceConfig?.fps ?: 30).coerceAtLeast(15)
                 outputScheduler = outputExecutor.scheduleAtFixedRate(
                     ::drawOutput,
                     0,

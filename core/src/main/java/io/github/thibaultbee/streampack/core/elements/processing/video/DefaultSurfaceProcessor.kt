@@ -527,6 +527,16 @@ private class DefaultSurfaceProcessor(
 
         val isPrimary = isPrimaryInput(surfaceTexture)
         if (isPrimary) {
+            val minHoldElapsed = !isTransitioning ||
+                (System.nanoTime() - transitionStartTimeNs) >= MIN_TRANSITION_HOLD_NS
+            if (!minHoldElapsed) {
+                // Keep rendering the blurred transition frame during the minimum hold window
+                // (Moblin-style ignoreFramesAfterAttach / cameraSwitchRemoveBlackish) so instant
+                // sources like BitmapSource or already-prepared ExoPlayer still show a smooth
+                // blur transition and initial dark camera frames are skipped.
+                return
+            }
+
             latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
             hasFirstFrame = true
 
@@ -743,6 +753,7 @@ private class DefaultSurfaceProcessor(
     companion object {
         private const val TAG = "SurfaceProcessor"
         private const val TRANSITION_TIMEOUT_MS = 3000L
+        private const val MIN_TRANSITION_HOLD_NS = 300_000_000L // 300ms (matches Moblin's 0.3s default)
         private const val BLUR_RAMP_DURATION_SEC = 2.0f
     }
 
