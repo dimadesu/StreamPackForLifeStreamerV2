@@ -101,13 +101,16 @@ class OpenGlRenderer {
     private var mTransitionFboA = -1
     private var mTransitionTextureB = -1
     private var mTransitionFboB = -1
+    private var mTransitionWidth = 0
+    private var mTransitionHeight = 0
+    private var mTransitionSourceAspectRatio = 0f
     private var mTransitionPreviewTextureA = -1
     private var mTransitionPreviewFboA = -1
     private var mTransitionPreviewTextureB = -1
     private var mTransitionPreviewFboB = -1
-    private var mTransitionWidth = 0
-    private var mTransitionHeight = 0
-    private var mTransitionSourceAspectRatio = 0f
+    private var mTransitionPreviewWidth = 0
+    private var mTransitionPreviewHeight = 0
+    private var mTransitionPreviewSourceAspectRatio = 0f
     private var mHasTransitionFrame = false
     private var mHasDistinctPreviewTransitionFrame = false
     private val mTransitionTexMatrix = FloatArray(16)
@@ -634,14 +637,17 @@ class OpenGlRenderer {
         activateExternalTexture(mExternalTextureId)
     }
 
-    private fun ensureTransitionBuffers(width: Int, height: Int, withPreviewBuffers: Boolean) {
-        val mainReady = mTransitionTextureA != -1 && mTransitionWidth == width && mTransitionHeight == height
-        val previewReady = !withPreviewBuffers || mTransitionPreviewTextureA != -1
-        if (mainReady && previewReady) {
-            return
-        }
+    private fun ensureTransitionBuffers(
+        width: Int,
+        height: Int,
+        previewWidth: Int = 0,
+        previewHeight: Int = 0
+    ) {
+        val mainReady = mTransitionTextureA != -1 &&
+            mTransitionWidth == width &&
+            mTransitionHeight == height
         if (!mainReady) {
-            releaseTransitionBuffers()
+            releaseMainTransitionBuffers()
             val pairA = create2DFboTexture(width, height)
             mTransitionTextureA = pairA.first
             mTransitionFboA = pairA.second
@@ -651,14 +657,67 @@ class OpenGlRenderer {
             mTransitionWidth = width
             mTransitionHeight = height
         }
-        if (withPreviewBuffers && mTransitionPreviewTextureA == -1) {
-            val pairA = create2DFboTexture(width, height)
-            mTransitionPreviewTextureA = pairA.first
-            mTransitionPreviewFboA = pairA.second
-            val pairB = create2DFboTexture(width, height)
-            mTransitionPreviewTextureB = pairB.first
-            mTransitionPreviewFboB = pairB.second
+        val withPreview = previewWidth > 0 && previewHeight > 0
+        if (withPreview) {
+            val previewReady = mTransitionPreviewTextureA != -1 &&
+                mTransitionPreviewWidth == previewWidth &&
+                mTransitionPreviewHeight == previewHeight
+            if (!previewReady) {
+                releasePreviewTransitionBuffers()
+                val pairA = create2DFboTexture(previewWidth, previewHeight)
+                mTransitionPreviewTextureA = pairA.first
+                mTransitionPreviewFboA = pairA.second
+                val pairB = create2DFboTexture(previewWidth, previewHeight)
+                mTransitionPreviewTextureB = pairB.first
+                mTransitionPreviewFboB = pairB.second
+                mTransitionPreviewWidth = previewWidth
+                mTransitionPreviewHeight = previewHeight
+            }
         }
+    }
+
+    private fun releaseMainTransitionBuffers() {
+        if (mTransitionTextureA != -1) {
+            deleteTexture(mTransitionTextureA)
+            mTransitionTextureA = -1
+        }
+        if (mTransitionFboA != -1) {
+            deleteFbo(mTransitionFboA)
+            mTransitionFboA = -1
+        }
+        if (mTransitionTextureB != -1) {
+            deleteTexture(mTransitionTextureB)
+            mTransitionTextureB = -1
+        }
+        if (mTransitionFboB != -1) {
+            deleteFbo(mTransitionFboB)
+            mTransitionFboB = -1
+        }
+        mTransitionWidth = 0
+        mTransitionHeight = 0
+        mTransitionSourceAspectRatio = 0f
+    }
+
+    private fun releasePreviewTransitionBuffers() {
+        if (mTransitionPreviewTextureA != -1) {
+            deleteTexture(mTransitionPreviewTextureA)
+            mTransitionPreviewTextureA = -1
+        }
+        if (mTransitionPreviewFboA != -1) {
+            deleteFbo(mTransitionPreviewFboA)
+            mTransitionPreviewFboA = -1
+        }
+        if (mTransitionPreviewTextureB != -1) {
+            deleteTexture(mTransitionPreviewTextureB)
+            mTransitionPreviewTextureB = -1
+        }
+        if (mTransitionPreviewFboB != -1) {
+            deleteFbo(mTransitionPreviewFboB)
+            mTransitionPreviewFboB = -1
+        }
+        mTransitionPreviewWidth = 0
+        mTransitionPreviewHeight = 0
+        mTransitionPreviewSourceAspectRatio = 0f
     }
 
     private fun create2DFboTexture(width: Int, height: Int): kotlin.Pair<Int, Int> {
@@ -697,41 +756,8 @@ class OpenGlRenderer {
     }
 
     private fun releaseTransitionBuffers() {
-        if (mTransitionTextureA != -1) {
-            deleteTexture(mTransitionTextureA)
-            mTransitionTextureA = -1
-        }
-        if (mTransitionFboA != -1) {
-            deleteFbo(mTransitionFboA)
-            mTransitionFboA = -1
-        }
-        if (mTransitionTextureB != -1) {
-            deleteTexture(mTransitionTextureB)
-            mTransitionTextureB = -1
-        }
-        if (mTransitionFboB != -1) {
-            deleteFbo(mTransitionFboB)
-            mTransitionFboB = -1
-        }
-        if (mTransitionPreviewTextureA != -1) {
-            deleteTexture(mTransitionPreviewTextureA)
-            mTransitionPreviewTextureA = -1
-        }
-        if (mTransitionPreviewFboA != -1) {
-            deleteFbo(mTransitionPreviewFboA)
-            mTransitionPreviewFboA = -1
-        }
-        if (mTransitionPreviewTextureB != -1) {
-            deleteTexture(mTransitionPreviewTextureB)
-            mTransitionPreviewTextureB = -1
-        }
-        if (mTransitionPreviewFboB != -1) {
-            deleteFbo(mTransitionPreviewFboB)
-            mTransitionPreviewFboB = -1
-        }
-        mTransitionWidth = 0
-        mTransitionHeight = 0
-        mTransitionSourceAspectRatio = 0f
+        releaseMainTransitionBuffers()
+        releasePreviewTransitionBuffers()
         mHasTransitionFrame = false
         mHasDistinctPreviewTransitionFrame = false
     }
@@ -791,7 +817,8 @@ class OpenGlRenderer {
     fun captureTransitionFrame(
         inputs: List<RenderInput>,
         sourceViewportSize: Size,
-        previewInputs: List<RenderInput>? = null
+        previewInputs: List<RenderInput>? = null,
+        previewViewportSize: Size? = null
     ): Boolean {
         checkInitializedOrThrow(mInitialized, true)
         checkGlThreadOrThrow(mGlThread)
@@ -806,14 +833,34 @@ class OpenGlRenderer {
         val fboWidth = (sourceViewportSize.width * scale).roundToInt().coerceAtLeast(16)
         val fboHeight = (sourceViewportSize.height * scale).roundToInt().coerceAtLeast(16)
 
-        val hasDistinctPreview = !previewInputs.isNullOrEmpty()
-        ensureTransitionBuffers(fboWidth, fboHeight, withPreviewBuffers = hasDistinctPreview)
+        val effectivePreviewSize = (previewViewportSize ?: sourceViewportSize).takeIf {
+            !previewInputs.isNullOrEmpty() && it.width > 0 && it.height > 0
+        }
+        val previewFboWidth: Int
+        val previewFboHeight: Int
+        if (effectivePreviewSize != null) {
+            val previewMaxDim = maxOf(effectivePreviewSize.width, effectivePreviewSize.height)
+            val previewScale = (TRANSITION_FBO_MAX_DIM.toFloat() / previewMaxDim).coerceAtMost(0.5f)
+            previewFboWidth = (effectivePreviewSize.width * previewScale).roundToInt().coerceAtLeast(16)
+            previewFboHeight = (effectivePreviewSize.height * previewScale).roundToInt().coerceAtLeast(16)
+        } else {
+            previewFboWidth = 0
+            previewFboHeight = 0
+        }
+
+        val hasDistinctPreview = effectivePreviewSize != null && !previewInputs.isNullOrEmpty()
+        ensureTransitionBuffers(fboWidth, fboHeight, previewFboWidth, previewFboHeight)
         mTransitionSourceAspectRatio =
             sourceViewportSize.width.toFloat() / sourceViewportSize.height.toFloat()
+        mTransitionPreviewSourceAspectRatio = if (effectivePreviewSize != null) {
+            effectivePreviewSize.width.toFloat() / effectivePreviewSize.height.toFloat()
+        } else {
+            mTransitionSourceAspectRatio
+        }
 
         renderInputsToFbo(mTransitionFboA, fboWidth, fboHeight, inputs)
-        if (!previewInputs.isNullOrEmpty()) {
-            renderInputsToFbo(mTransitionPreviewFboA, fboWidth, fboHeight, previewInputs)
+        if (hasDistinctPreview && previewInputs != null) {
+            renderInputsToFbo(mTransitionPreviewFboA, previewFboWidth, previewFboHeight, previewInputs)
         }
         mHasDistinctPreviewTransitionFrame = hasDistinctPreview
 
@@ -836,9 +883,12 @@ class OpenGlRenderer {
         fboA: Int,
         texB: Int,
         fboB: Int,
+        width: Int,
+        height: Int,
         texelX: Float,
         texelY: Float
     ) {
+        GLES20.glViewport(0, 0, width, height)
         blurProgram.updateTexelOffset(texelX, texelY)
 
         // Pass 1: A -> B
@@ -870,7 +920,6 @@ class OpenGlRenderer {
         mCurrentProgram = blurProgram
         mCurrentSurface = null
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
-        GLES20.glViewport(0, 0, mTransitionWidth, mTransitionHeight)
         blurProgram.updateTextureMatrix(IDENTITY_MATRIX)
 
         val texelX = radiusScale / mTransitionWidth.toFloat()
@@ -881,18 +930,29 @@ class OpenGlRenderer {
             mTransitionFboA,
             mTransitionTextureB,
             mTransitionFboB,
+            mTransitionWidth,
+            mTransitionHeight,
             texelX,
             texelY
         )
-        if (mHasDistinctPreviewTransitionFrame && mTransitionPreviewTextureA != -1) {
+        if (
+            mHasDistinctPreviewTransitionFrame &&
+            mTransitionPreviewTextureA != -1 &&
+            mTransitionPreviewWidth > 0 &&
+            mTransitionPreviewHeight > 0
+        ) {
+            val previewTexelX = radiusScale / mTransitionPreviewWidth.toFloat()
+            val previewTexelY = radiusScale / mTransitionPreviewHeight.toFloat()
             stepBlurOnFboPair(
                 blurProgram,
                 mTransitionPreviewTextureA,
                 mTransitionPreviewFboA,
                 mTransitionPreviewTextureB,
                 mTransitionPreviewFboB,
-                texelX,
-                texelY
+                mTransitionPreviewWidth,
+                mTransitionPreviewHeight,
+                previewTexelX,
+                previewTexelY
             )
         }
 
@@ -917,17 +977,25 @@ class OpenGlRenderer {
         checkInitializedOrThrow(mInitialized, true)
         checkGlThreadOrThrow(mGlThread)
 
-        val transitionTexture = if (
-            usePreviewTransitionFrame &&
+        val usePreview = usePreviewTransitionFrame &&
             mHasDistinctPreviewTransitionFrame &&
-            mTransitionPreviewTextureA != -1
-        ) {
+            mTransitionPreviewTextureA != -1 &&
+            mTransitionPreviewWidth > 0 &&
+            mTransitionPreviewHeight > 0
+        val transitionTexture = if (usePreview) {
             mTransitionPreviewTextureA
         } else {
             mTransitionTextureA
         }
+        val activeFboWidth = if (usePreview) mTransitionPreviewWidth else mTransitionWidth
+        val activeFboHeight = if (usePreview) mTransitionPreviewHeight else mTransitionHeight
+        val baseSourceAspectRatio = if (usePreview) {
+            mTransitionPreviewSourceAspectRatio
+        } else {
+            mTransitionSourceAspectRatio
+        }
 
-        if (isMuted || !mHasTransitionFrame || transitionTexture == -1) {
+        if (isMuted || !mHasTransitionFrame || transitionTexture == -1 || activeFboWidth <= 0 || activeFboHeight <= 0) {
             render(timestampNs, IDENTITY_MATRIX, surface, isMuted = true)
             return
         }
@@ -961,11 +1029,11 @@ class OpenGlRenderer {
         // from the reference output used to capture the transition FBO.
         val normalizedRot = ((relativeRotationDegrees % 360) + 360) % 360
         val effectiveSourceRatio = if (
-            (normalizedRot == 90 || normalizedRot == 270) && mTransitionSourceAspectRatio > 0f
+            (normalizedRot == 90 || normalizedRot == 270) && baseSourceAspectRatio > 0f
         ) {
-            1f / mTransitionSourceAspectRatio
+            1f / baseSourceAspectRatio
         } else {
-            mTransitionSourceAspectRatio
+            baseSourceAspectRatio
         }
         val viewport = computeTransitionViewport(targetW, targetH, effectiveSourceRatio)
         GLES20.glViewport(viewport.left, viewport.top, viewport.width(), viewport.height())
@@ -983,8 +1051,8 @@ class OpenGlRenderer {
         }
         blurProgram.updateTextureMatrix(mTransitionTexMatrix)
         blurProgram.updateTexelOffset(
-            extraBlurRadius / mTransitionWidth.toFloat(),
-            extraBlurRadius / mTransitionHeight.toFloat()
+            extraBlurRadius / activeFboWidth.toFloat(),
+            extraBlurRadius / activeFboHeight.toFloat()
         )
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)

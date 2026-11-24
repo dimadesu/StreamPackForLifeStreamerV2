@@ -449,10 +449,18 @@ private class DefaultSurfaceProcessor(
         if (inputs.isEmpty()) return
 
         // If there is a distinct preview output (e.g. front camera or dual camera where the preview
-        // is mirrored while the stream output is unmirrored), capture its exact preview transform
-        // into a separate preview FBO so the preview stays mirrored during the blur transition.
+        // is mirrored while the stream output is unmirrored, or when preview and encoder have
+        // different orientations), capture its exact preview transform and viewport dimensions
+        // into a separate preview FBO so the preview stays mirrored and upright during the transition.
         val previewOutput = typedOutputs.firstOrNull { it.isPreviewOutput }
-        val previewInputs = if (previewOutput != null && previewOutput !== referenceOutput) {
+        val previewViewportSize = previewOutput?.viewportRect?.let {
+            Size(it.width(), it.height())
+        }?.takeIf { it.width > 0 && it.height > 0 }
+        val previewInputs = if (
+            previewOutput != null &&
+            previewOutput !== referenceOutput &&
+            previewViewportSize != null
+        ) {
             buildTransitionInputsForOutput(previewOutput, resolver, hasUnmirrored)
                 .takeIf { it.isNotEmpty() }
         } else {
@@ -463,7 +471,12 @@ private class DefaultSurfaceProcessor(
         transitionPreviewTargetRotation = previewOutput?.targetRotation ?: referenceOutput.targetRotation
         transitionHasSeparatePreviewFbo = previewInputs != null
         try {
-            renderer.captureTransitionFrame(inputs, viewportSize, previewInputs)
+            renderer.captureTransitionFrame(
+                inputs = inputs,
+                sourceViewportSize = viewportSize,
+                previewInputs = previewInputs,
+                previewViewportSize = previewViewportSize
+            )
         } catch (t: Throwable) {
             Logger.w(TAG, "Failed to capture transition frame: ${t.message}")
         }
@@ -559,18 +572,39 @@ private class DefaultSurfaceProcessor(
         surfaceInputs.find { it.surfaceTexture == surfaceTexture }?.hasFrame = true
 
         val isPrimary = isPrimaryInput(surfaceTexture)
-        if (isPrimary) {
-            val minHoldElapsed = !isTransitioning ||
+        val shouldCompleteTransition = if (isTransitioning) {
+            val expectedPrimary = incomingPrimarySurface
+            val primaryInputReady = expectedPrimary != null &&
+                surfaceInputs.any { it.surface == expectedPrimary && it.hasFrame }
+            val resolver = inputResolver
+            val allActiveInputsReady = if (resolver == null) {
+                primaryInputReady
+            } else {
+                val activeInputs = surfaceInputs.filter { resolver.getTargetRect(it.surface) != null }
+                activeInputs.isNotEmpty() && activeInputs.all { it.hasFrame }
+            }
+            val minHoldElapsed =
                 (System.nanoTime() - transitionStartTimeNs) >= MIN_TRANSITION_HOLD_NS
-            if (!minHoldElapsed) {
+            primaryInputReady && allActiveInputsReady && minHoldElapsed
+        } else {
+            false
+        }
+
+        if (isPrimary || shouldCompleteTransition) {
+            if (isTransitioning && !shouldCompleteTransition) {
                 // Keep rendering the blurred transition frame during the minimum hold window
-                // (Moblin-style ignoreFramesAfterAttach / cameraSwitchRemoveBlackish) so instant
-                // sources like BitmapSource or already-prepared ExoPlayer still show a smooth
-                // blur transition and initial dark camera frames are skipped.
+                // (Moblin-style ignoreFramesAfterAttach / cameraSwitchRemoveBlackish) and until
+                // all active composited inputs (e.g. dual-camera PiP) have produced their first
+                // frame so instant sources show a smooth blur transition and the PiP window never
+                // pops in late after the blur clears.
                 return
             }
 
-            latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
+            if (isPrimary) {
+                latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
+            } else if (latestTimestampNs == 0L) {
+                latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
+            }
             hasFirstFrame = true
 
             val wasTransitioning = isTransitioning
@@ -666,7 +700,9 @@ private class DefaultSurfaceProcessor(
                     }
                     val refRotDeg = OrientationUtils.getSurfaceRotationDegrees(baseTargetRotation)
                     val outRotDeg = OrientationUtils.getSurfaceRotationDegrees(output.targetRotation)
-                    val relativeRotationDegrees = (refRotDeg - outRotDeg + 360) % 360
+                    // In FBO texture space (after SurfaceOutput's preVerticalFlip), rotating the
+                    // sampled image to match a new output targetRotation requires (outRotDeg - refRotDeg).
+                    val relativeRotationDegrees = (outRotDeg - refRotDeg + 360) % 360
                     renderer.renderTransitionFrame(
                         timestampNs = renderTimestampNs,
                         surface = output.targetSurface,

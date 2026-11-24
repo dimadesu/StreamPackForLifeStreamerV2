@@ -4,7 +4,9 @@ import android.util.Size
 import android.view.Surface
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
 import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
+import io.github.thibaultbee.streampack.core.elements.utils.OrientationUtils
 import io.mockk.mockk
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -84,6 +86,19 @@ class DefaultSurfaceProcessorSnapshotTest {
         val selected = selectSnapshotSurface(listOf(mirroredPreview))
 
         assertSame(mirroredPreview, selected)
+    }
+
+    @Test
+    fun `transition relative rotation matches SurfaceOutput FBO rotation direction`() {
+        // When an FBO is captured at ROTATION_90 (90 deg) and rendered onto an output at
+        // ROTATION_0 (0 deg), SurfaceOutput's additionalTransform (which applies preVerticalFlip
+        // before preRotate) requires (outRotDeg - refRotDeg + 360) % 360 = 270 deg in FBO texture
+        // space rather than (refRotDeg - outRotDeg) = 90 deg.
+        val refRotDeg = OrientationUtils.getSurfaceRotationDegrees(Surface.ROTATION_90)
+        val outRotDeg = OrientationUtils.getSurfaceRotationDegrees(Surface.ROTATION_0)
+        val relativeRotationDegrees = (outRotDeg - refRotDeg + 360) % 360
+
+        assertEquals(270, relativeRotationDegrees)
     }
 }
 
