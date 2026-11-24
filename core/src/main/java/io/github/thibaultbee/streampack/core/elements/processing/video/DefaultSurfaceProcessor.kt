@@ -77,6 +77,10 @@ private class DefaultSurfaceProcessor(
     private var isRenderLoopRunning = false
     @Volatile private var isTransitioning: Boolean = false
     private var transitionIntervalNs: Long = 0L
+    private var transitionStartTimeNs: Long = 0L
+    private var transitionReferenceWasMirrored: Boolean = false
+    private var transitionSourceIsMirror: Boolean = false
+    private var incomingPrimarySurface: Surface? = null
     private val cfrFrameIntervalNs = if (cfrFps > 0) 1_000_000_000L / cfrFps else 0L
     private var nextFrameTimeNs = 0L
     private val transitionTimeoutRunnable = Runnable {
@@ -155,7 +159,7 @@ private class DefaultSurfaceProcessor(
                 throw IllegalStateException("SurfaceProcessor is released")
             }
 
-            val textureId = if (isSecondary) {
+            val textureId = if (isSecondary || surfaceInputs.any { it.textureId == renderer.textureName }) {
                 renderer.createTextureName()
             } else {
                 renderer.textureName
@@ -176,6 +180,9 @@ private class DefaultSurfaceProcessor(
             val surfaceInput =
                 SurfaceInput(Surface(surfaceTexture), surfaceTexture, textureId, surfaceSize)
             surfaceInputs.add(surfaceInput)
+            if (!isSecondary) {
+                incomingPrimarySurface = surfaceInput.surface
+            }
             surfaceInput
         }
 
@@ -214,6 +221,9 @@ private class DefaultSurfaceProcessor(
                 surfaceInputsToTimeConverterMap.remove(surfaceTexture)
                 surfaceInputsToMatrixMap.remove(surfaceTexture)
                 surfaceInputs.remove(surfaceInput)
+                if (incomingPrimarySurface == surface) {
+                    incomingPrimarySurface = null
+                }
 
                 if (surfaceInputs.isEmpty() && isRenderLoopRunning && !isTransitioning) {
                     isRenderLoopRunning = false
@@ -356,12 +366,17 @@ private class DefaultSurfaceProcessor(
 
     override fun startTransition(fps: Int) {
         if (isReleaseRequested.get()) return
-        executeSafely {
-            if (isReleaseRequested.get() || isReleased) return@executeSafely
+        val future = submitSafely {
+            if (isReleaseRequested.get() || isReleased) return@submitSafely
             val targetFps = if (fps > 0) fps else 30
             transitionIntervalNs = 1_000_000_000L / targetFps
+            if (!isTransitioning) {
+                captureLastFrameForTransition()
+                transitionStartTimeNs = System.nanoTime()
+            }
             isTransitioning = true
             hasFirstFrame = false
+            incomingPrimarySurface = null
             nextFrameTimeNs = 0L
 
             glHandler.removeCallbacks(transitionTimeoutRunnable)
@@ -370,8 +385,49 @@ private class DefaultSurfaceProcessor(
             if (!isRenderLoopRunning) {
                 isRenderLoopRunning = true
                 glHandler.post(renderRunnable)
-                Logger.i(TAG, "Started transition black frame loop at $targetFps fps")
+                Logger.i(TAG, "Started transition blur frame loop at $targetFps fps")
             }
+        }
+        try {
+            future.get()
+        } catch (t: Throwable) {
+            Logger.w(TAG, "startTransition failed: ${t.message}")
+        }
+    }
+
+    private fun captureLastFrameForTransition() {
+        if (!hasFirstFrame || surfaceInputs.none { it.hasFrame }) return
+        val referenceOutput = selectSnapshotSurface(surfaceOutputs) as? SurfaceOutput ?: return
+        val viewport = referenceOutput.viewportRect
+        val viewportSize = Size(viewport.width(), viewport.height())
+        if (viewportSize.width <= 0 || viewportSize.height <= 0) return
+
+        val resolver = inputResolver
+        val inputs = if (resolver == null) {
+            val primaryInput = surfaceInputs.firstOrNull { it.hasFrame } ?: return
+            val rawTransform = surfaceInputsToMatrixMap[primaryInput.surfaceTexture] ?: textureMatrix
+            val outMatrix = FloatArray(16)
+            referenceOutput.updateTransformMatrix(outMatrix, rawTransform)
+            listOf(OpenGlRenderer.RenderInput(primaryInput.textureId, outMatrix))
+        } else {
+            val typedOutputs = surfaceOutputs.filterIsInstance<SurfaceOutput>()
+            val hasUnmirrored = typedOutputs.any { !it.needMirroring }
+            compositor.buildRenderInputs(
+                surfaceInputs = surfaceInputs,
+                surfaceInputsToMatrixMap = surfaceInputsToMatrixMap,
+                output = referenceOutput,
+                resolver = resolver,
+                hasUnmirroredOutput = hasUnmirrored
+            )
+        }
+        if (inputs.isEmpty()) return
+
+        transitionReferenceWasMirrored = referenceOutput.needMirroring
+        transitionSourceIsMirror = referenceOutput.isSourceMirrored
+        try {
+            renderer.captureTransitionFrame(inputs, viewportSize)
+        } catch (t: Throwable) {
+            Logger.w(TAG, "Failed to capture transition frame: ${t.message}")
         }
     }
 
@@ -433,8 +489,12 @@ private class DefaultSurfaceProcessor(
     }
 
     private fun isPrimaryInput(surfaceTexture: SurfaceTexture): Boolean {
-        val resolver = inputResolver ?: return true
         val input = surfaceInputs.find { it.surfaceTexture == surfaceTexture } ?: return false
+        if (isTransitioning) {
+            val expectedPrimary = incomingPrimarySurface ?: return false
+            if (input.surface != expectedPrimary) return false
+        }
+        val resolver = inputResolver ?: return true
         return !resolver.isSecondaryInput(input.surface)
     }
 
@@ -495,7 +555,7 @@ private class DefaultSurfaceProcessor(
     // Executed on GL thread continuously (CFR/Transition) or onFrameAvailable (Event-driven)
     private fun renderLatestFrame() {
         if (isTransitioning) {
-            renderBlackFrame(System.nanoTime())
+            renderTransitionFrame(System.nanoTime())
             return
         }
 
@@ -523,19 +583,30 @@ private class DefaultSurfaceProcessor(
         }
     }
 
-    private fun renderBlackFrame(renderTimestampNs: Long) {
-        surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach {
+    private fun renderTransitionFrame(renderTimestampNs: Long) {
+        val elapsedSec = ((renderTimestampNs - transitionStartTimeNs).coerceAtLeast(0L)) / 1_000_000_000f
+        if (!isMuted && renderer.hasTransitionFrame && elapsedSec <= BLUR_RAMP_DURATION_SEC) {
+            // Progressive blur ramp (Moblin-style: grows over the first 2 seconds, then freezes)
+            val progress = (elapsedSec / BLUR_RAMP_DURATION_SEC).coerceIn(0f, 1f)
+            renderer.stepTransitionBlur(0.8f + progress * 1.4f)
+        }
+        val extraBlurRadius = 1.0f + (elapsedSec / BLUR_RAMP_DURATION_SEC).coerceIn(0f, 1f) * 1.5f
+
+        surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach { output ->
             try {
-                if (it.isStreaming()) {
-                    renderer.render(
-                        renderTimestampNs,
-                        surfaceOutputMatrix,
-                        it.targetSurface,
-                        isMuted = true
+                if (output.isStreaming()) {
+                    val shouldMirrorOutput = output.isPreviewOutput && transitionSourceIsMirror
+                    val mirrorRelativeToFbo = shouldMirrorOutput != transitionReferenceWasMirrored
+                    renderer.renderTransitionFrame(
+                        timestampNs = renderTimestampNs,
+                        surface = output.targetSurface,
+                        mirrorHorizontally = mirrorRelativeToFbo,
+                        extraBlurRadius = extraBlurRadius,
+                        isMuted = isMuted
                     )
                 }
             } catch (t: Throwable) {
-                Logger.e(TAG, "Error while rendering black transition frame", t)
+                Logger.e(TAG, "Error while rendering transition frame", t)
             }
         }
     }
@@ -543,10 +614,15 @@ private class DefaultSurfaceProcessor(
     // Upstream path: draws the primary input only. Also used while a source switch briefly
     // holds two inputs without a dual source, so the incoming input is never shown as PiP.
     private fun renderSingleInput(renderTimestampNs: Long) {
+        val activeInput = (incomingPrimarySurface?.let { expected ->
+            surfaceInputs.find { it.surface == expected && it.hasFrame }
+        } ?: surfaceInputs.lastOrNull { it.hasFrame } ?: surfaceInputs.firstOrNull())
+        val activeTransform = activeInput?.let { surfaceInputsToMatrixMap[it.surfaceTexture] } ?: textureMatrix
+        val activeTextureId = activeInput?.textureId ?: renderer.textureName
         val snapshotSurface = selectSnapshotSurface(surfaceOutputs)
         surfaceOutputs.filterIsInstance<SurfaceOutput>().forEach {
             try {
-                it.updateTransformMatrix(singleInputOutputMatrix, textureMatrix)
+                it.updateTransformMatrix(singleInputOutputMatrix, activeTransform)
                 // Keep surfaceOutputMatrix aligned with the snapshot target (and unmirrored when
                 // possible so mirrored front-camera preview does not flip snapshots).
                 if (it === snapshotSurface) {
@@ -557,7 +633,8 @@ private class DefaultSurfaceProcessor(
                         renderTimestampNs,
                         singleInputOutputMatrix,
                         it.targetSurface,
-                        isMuted
+                        isMuted,
+                        activeTextureId
                     )
                 }
             } catch (t: Throwable) {
@@ -661,6 +738,7 @@ private class DefaultSurfaceProcessor(
     companion object {
         private const val TAG = "SurfaceProcessor"
         private const val TRANSITION_TIMEOUT_MS = 3000L
+        private const val BLUR_RAMP_DURATION_SEC = 2.0f
     }
 
     private data class PendingSnapshot(

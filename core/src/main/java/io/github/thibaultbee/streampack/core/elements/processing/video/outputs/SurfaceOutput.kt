@@ -53,10 +53,13 @@ class SurfaceOutput(
     val isStreaming: () -> Boolean,
     sourceResolution: Size,
     val needMirroring: Boolean,
-    sourceInfoProvider: ISourceInfoProvider
+    sourceInfoProvider: ISourceInfoProvider,
+    val isPreviewOutput: Boolean = false
 ) :
     ISurfaceOutput {
     override val type = ISurfaceOutput.OutputType.INTERNAL
+
+    val isSourceMirrored: Boolean = sourceInfoProvider.isMirror
 
     @IntRange(from = 0, to = 359)
     val rotationDegrees = sourceInfoProvider.getRelativeRotationDegrees(

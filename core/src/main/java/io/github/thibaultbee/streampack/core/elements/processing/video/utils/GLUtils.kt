@@ -102,6 +102,54 @@ void main() {
             + "void main() {\n"
             + "    gl_FragColor = vec4(0.0, 0.0, 0.0, uAlphaScale);\n"
             + "}\n")
+
+    val TEXTURE_2D_BLUR_FRAGMENT_SHADER: String = String.format(
+        Locale.US,
+        ("""precision mediump float;
+varying vec2 %s;
+uniform sampler2D %s;
+uniform float uAlphaScale;
+uniform vec2 uTexelOffset;
+void main() {
+    vec2 uv = %s;
+    vec2 o1 = uTexelOffset;
+    vec2 o2 = uTexelOffset * 2.0;
+    vec4 sum = texture2D(%s, uv) * 0.20;
+    sum += texture2D(%s, uv + vec2(o1.x, 0.0)) * 0.12;
+    sum += texture2D(%s, uv - vec2(o1.x, 0.0)) * 0.12;
+    sum += texture2D(%s, uv + vec2(0.0, o1.y)) * 0.12;
+    sum += texture2D(%s, uv - vec2(0.0, o1.y)) * 0.12;
+    sum += texture2D(%s, uv + vec2(o1.x, o1.y)) * 0.08;
+    sum += texture2D(%s, uv + vec2(-o1.x, o1.y)) * 0.08;
+    sum += texture2D(%s, uv + vec2(o1.x, -o1.y)) * 0.08;
+    sum += texture2D(%s, uv + vec2(-o1.x, -o1.y)) * 0.08;
+    vec4 outer = (
+        texture2D(%s, uv + vec2(o2.x, 0.0)) +
+        texture2D(%s, uv - vec2(o2.x, 0.0)) +
+        texture2D(%s, uv + vec2(0.0, o2.y)) +
+        texture2D(%s, uv - vec2(0.0, o2.y))
+    ) * 0.25;
+    vec4 color = mix(sum, outer, 0.35);
+    gl_FragColor = vec4(color.rgb, color.a * uAlphaScale);
+}
+"""),
+        VAR_TEXTURE_COORD,
+        VAR_TEXTURE,
+        VAR_TEXTURE_COORD,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE,
+        VAR_TEXTURE
+    )
     val VERTEX_COORDS: FloatArray = floatArrayOf(
         -1.0f, -1.0f,  // 0 bottom left
         1.0f, -1.0f,  // 1 bottom right
@@ -791,4 +839,55 @@ void main() {
     }
 
     class BlankShaderProgram : Program2D(BLANK_VERTEX_SHADER, BLANK_FRAGMENT_SHADER)
+
+    class Texture2DBlurShaderProgram : Program2D(
+        DEFAULT_VERTEX_SHADER,
+        TEXTURE_2D_BLUR_FRAGMENT_SHADER
+    ) {
+        private var mSamplerLoc = -1
+        private var mTexMatrixLoc = -1
+        private var mTexCoordLoc = -1
+        private var mTexelOffsetLoc = -1
+
+        init {
+            loadLocations()
+        }
+
+        override fun use() {
+            super.use()
+            GLES20.glUniform1i(mSamplerLoc, 0)
+            GLES20.glEnableVertexAttribArray(mTexCoordLoc)
+            checkGlErrorOrThrow("glEnableVertexAttribArray")
+            GLES20.glVertexAttribPointer(
+                mTexCoordLoc, 2, GLES20.GL_FLOAT,
+                false, 0, TEX_BUF
+            )
+            checkGlErrorOrThrow("glVertexAttribPointer")
+        }
+
+        fun updateTextureMatrix(textureMat: FloatArray) {
+            glUniformMatrix4fv(
+                mTexMatrixLoc, 1, false,
+                textureMat, 0
+            )
+            checkGlErrorOrThrow("glUniformMatrix4fv")
+        }
+
+        fun updateTexelOffset(offsetX: Float, offsetY: Float) {
+            GLES20.glUniform2f(mTexelOffsetLoc, offsetX, offsetY)
+            checkGlErrorOrThrow("glUniform2f")
+        }
+
+        override fun loadLocations() {
+            super.loadLocations()
+            mSamplerLoc = GLES20.glGetUniformLocation(mProgramHandle, VAR_TEXTURE)
+            checkLocationOrThrow(mSamplerLoc, VAR_TEXTURE)
+            mTexCoordLoc = GLES20.glGetAttribLocation(mProgramHandle, "aTextureCoord")
+            checkLocationOrThrow(mTexCoordLoc, "aTextureCoord")
+            mTexMatrixLoc = GLES20.glGetUniformLocation(mProgramHandle, "uTexMatrix")
+            checkLocationOrThrow(mTexMatrixLoc, "uTexMatrix")
+            mTexelOffsetLoc = GLES20.glGetUniformLocation(mProgramHandle, "uTexelOffset")
+            checkLocationOrThrow(mTexelOffsetLoc, "uTexelOffset")
+        }
+    }
 }

@@ -230,7 +230,8 @@ class SurfaceProcessorPreviewHelper(
                 isStreaming = isStreaming,
                 sourceResolution = effectiveInputSize,
                 needMirroring = mirroring,
-                sourceInfoProvider = previewInfoProvider
+                sourceInfoProvider = previewInfoProvider,
+                isPreviewOutput = true
             )
             processor.addOutputSurface(output)
             attachment = PreviewAttachment(processor, output, effectiveInputSize)

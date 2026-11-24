@@ -36,11 +36,14 @@ import androidx.core.graphics.createBitmap
 import androidx.core.util.Pair
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.SurfaceOutput
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.EMPTY_ATTRIBS
+import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.IDENTITY_MATRIX
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.InputFormat
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.NO_OUTPUT_SURFACE
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.PIXEL_STRIDE
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.Program2D
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.SamplerShaderProgram
+import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.Texture2DBlurShaderProgram
+import android.opengl.Matrix
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.checkEglErrorOrLog
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.checkEglErrorOrThrow
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.checkGlErrorOrThrow
@@ -92,6 +95,23 @@ class OpenGlRenderer {
     protected var mCurrentInputformat: InputFormat = InputFormat.UNKNOWN
 
     private var mExternalTextureId = -1
+    private var mBlurProgram: Texture2DBlurShaderProgram? = null
+    private var mTransitionTextureA = -1
+    private var mTransitionFboA = -1
+    private var mTransitionTextureB = -1
+    private var mTransitionFboB = -1
+    private var mTransitionWidth = 0
+    private var mTransitionHeight = 0
+    private var mTransitionSourceAspectRatio = 0f
+    private var mHasTransitionFrame = false
+    private val mMirroredTransitionTexMatrix = FloatArray(16).apply {
+        Matrix.setIdentityM(this, 0)
+        Matrix.translateM(this, 0, 1f, 0f, 0f)
+        Matrix.scaleM(this, 0, -1f, 1f, 1f)
+    }
+
+    val hasTransitionFrame: Boolean
+        get() = mHasTransitionFrame
 
     /**
      * Initializes the OpenGLRenderer
@@ -147,6 +167,7 @@ class OpenGlRenderer {
             makeCurrent(mTempSurface)
             infoBuilder.setGlVersion(glVersionNumber)
             mProgramHandles = createPrograms(dynamicRangeCorrected, shaderOverrides)
+            mBlurProgram = Texture2DBlurShaderProgram()
             mExternalTextureId = createTexture()
             useAndConfigureProgramWithTexture(mExternalTextureId)
         } catch (e: IllegalStateException) {
@@ -281,7 +302,8 @@ class OpenGlRenderer {
         timestampNs: Long,
         textureTransform: FloatArray,
         surface: Surface,
-        isMuted: Boolean = false
+        isMuted: Boolean = false,
+        textureId: Int = mExternalTextureId
     ) {
         checkInitializedOrThrow(mInitialized, true)
         checkGlThreadOrThrow(mGlThread)
@@ -323,6 +345,7 @@ class OpenGlRenderer {
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         } else {
+            useAndConfigureProgramWithTexture(textureId)
             // TODO(b/245855601): Upload the matrix to GPU when textureTransform is changed.
             val program: Program2D = requireNotNull(mCurrentProgram)
             if (program is SamplerShaderProgram) {
@@ -333,6 +356,9 @@ class OpenGlRenderer {
             // Draw the rect.
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP,  /*firstVertex=*/0,  /*vertexCount=*/4)
             checkGlErrorOrThrow("glDrawArrays")
+            if (textureId != mExternalTextureId) {
+                activateExternalTexture(mExternalTextureId)
+            }
         }
 
         // Set timestamp
@@ -590,6 +616,295 @@ class OpenGlRenderer {
         activateExternalTexture(mExternalTextureId)
     }
 
+    private fun ensureTransitionBuffers(width: Int, height: Int) {
+        if (mTransitionTextureA != -1 && mTransitionWidth == width && mTransitionHeight == height) {
+            return
+        }
+        releaseTransitionBuffers()
+        val pairA = create2DFboTexture(width, height)
+        mTransitionTextureA = pairA.first
+        mTransitionFboA = pairA.second
+        val pairB = create2DFboTexture(width, height)
+        mTransitionTextureB = pairB.first
+        mTransitionFboB = pairB.second
+        mTransitionWidth = width
+        mTransitionHeight = height
+    }
+
+    private fun create2DFboTexture(width: Int, height: Int): kotlin.Pair<Int, Int> {
+        val texture = generateTexture()
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        checkGlErrorOrThrow("glActiveTexture")
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
+        checkGlErrorOrThrow("glBindTexture")
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, width,
+            height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+        )
+        checkGlErrorOrThrow("glTexImage2D")
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR
+        )
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR
+        )
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE
+        )
+        GLES20.glTexParameteri(
+            GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE
+        )
+        val fbo = generateFbo()
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo)
+        checkGlErrorOrThrow("glBindFramebuffer")
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, texture, 0
+        )
+        checkGlErrorOrThrow("glFramebufferTexture2D")
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        return kotlin.Pair(texture, fbo)
+    }
+
+    private fun releaseTransitionBuffers() {
+        if (mTransitionTextureA != -1) {
+            deleteTexture(mTransitionTextureA)
+            mTransitionTextureA = -1
+        }
+        if (mTransitionFboA != -1) {
+            deleteFbo(mTransitionFboA)
+            mTransitionFboA = -1
+        }
+        if (mTransitionTextureB != -1) {
+            deleteTexture(mTransitionTextureB)
+            mTransitionTextureB = -1
+        }
+        if (mTransitionFboB != -1) {
+            deleteFbo(mTransitionFboB)
+            mTransitionFboB = -1
+        }
+        mTransitionWidth = 0
+        mTransitionHeight = 0
+        mTransitionSourceAspectRatio = 0f
+        mHasTransitionFrame = false
+    }
+
+    /**
+     * Captures the current external texture frame into an internal downscaled 2D FBO
+     * and applies an initial multi-pass Gaussian blur for smooth scene transitions
+     * (similar to Moblin's initial blur radius).
+     */
+    fun captureTransitionFrame(
+        inputs: List<RenderInput>,
+        sourceViewportSize: Size
+    ): Boolean {
+        checkInitializedOrThrow(mInitialized, true)
+        checkGlThreadOrThrow(mGlThread)
+        if (inputs.isEmpty() || sourceViewportSize.width <= 0 || sourceViewportSize.height <= 0) {
+            mHasTransitionFrame = false
+            return false
+        }
+
+        val maxDim = maxOf(sourceViewportSize.width, sourceViewportSize.height)
+        val scale = (TRANSITION_FBO_MAX_DIM.toFloat() / maxDim).coerceAtMost(0.5f)
+        val fboWidth = (sourceViewportSize.width * scale).roundToInt().coerceAtLeast(16)
+        val fboHeight = (sourceViewportSize.height * scale).roundToInt().coerceAtLeast(16)
+
+        ensureTransitionBuffers(fboWidth, fboHeight)
+        mTransitionSourceAspectRatio =
+            sourceViewportSize.width.toFloat() / sourceViewportSize.height.toFloat()
+
+        // Bind transition FBO A and render current external input(s) into it
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, mTransitionFboA)
+        mCurrentSurface = null
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glViewport(0, 0, fboWidth, fboHeight)
+        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+        inputs.forEach { input ->
+            val rect = input.targetRectNorm
+            val isFullScreen =
+                rect.left == 0f && rect.top == 0f && rect.right == 1f && rect.bottom == 1f
+            if (isFullScreen) {
+                GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+                GLES20.glViewport(0, 0, fboWidth, fboHeight)
+            } else {
+                val glLeft = (rect.left * fboWidth).roundToInt()
+                val glBottom = ((1f - rect.bottom) * fboHeight).roundToInt()
+                val glWidth = ((rect.right - rect.left) * fboWidth).roundToInt()
+                val glHeight = ((rect.bottom - rect.top) * fboHeight).roundToInt()
+                GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
+                GLES20.glScissor(glLeft, glBottom, glWidth, glHeight)
+                GLES20.glViewport(glLeft, glBottom, glWidth, glHeight)
+            }
+
+            useAndConfigureProgramWithTexture(input.textureId)
+            val program: Program2D = requireNotNull(mCurrentProgram)
+            if (program is SamplerShaderProgram) {
+                program.updateTextureMatrix(input.textureTransform)
+            }
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            checkGlErrorOrThrow("glDrawArrays")
+        }
+
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+        // Apply initial ping-pong blur passes so the very first transition frame already has
+        // Moblin's base blur radius (~15px at 1080p).
+        repeat(INITIAL_BLUR_PING_PONG_PASSES) { pass ->
+            stepTransitionBlur(1.2f + pass * 0.6f)
+        }
+
+        mCurrentProgram = null
+        useAndConfigureProgramWithTexture(mExternalTextureId)
+        mHasTransitionFrame = true
+        return true
+    }
+
+    /**
+     * Advances the progressive Gaussian blur on the captured transition frame by one ping-pong
+     * FBO iteration (A -> B -> A).
+     */
+    fun stepTransitionBlur(radiusScale: Float = 1.5f) {
+        checkInitializedOrThrow(mInitialized, true)
+        checkGlThreadOrThrow(mGlThread)
+        if (mTransitionTextureA == -1 || mTransitionWidth <= 0 || mTransitionHeight <= 0) return
+
+        val blurProgram = mBlurProgram ?: return
+        blurProgram.use()
+        mCurrentProgram = blurProgram
+        mCurrentSurface = null
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glViewport(0, 0, mTransitionWidth, mTransitionHeight)
+        blurProgram.updateTextureMatrix(IDENTITY_MATRIX)
+
+        val texelX = radiusScale / mTransitionWidth.toFloat()
+        val texelY = radiusScale / mTransitionHeight.toFloat()
+        blurProgram.updateTexelOffset(texelX, texelY)
+
+        // Pass 1: A -> B
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, mTransitionFboB)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mTransitionTextureA)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        checkGlErrorOrThrow("glDrawArrays")
+
+        // Pass 2: B -> A
+        blurProgram.updateTexelOffset(texelX * 1.25f, texelY * 1.25f)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, mTransitionFboA)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mTransitionTextureB)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        checkGlErrorOrThrow("glDrawArrays")
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        mCurrentProgram = null
+        useAndConfigureProgramWithTexture(mExternalTextureId)
+    }
+
+    /**
+     * Renders the blurred transition frame from the internal 2D FBO to [surface],
+     * preserving the captured frame's aspect ratio regardless of subsequent output updates.
+     */
+    fun renderTransitionFrame(
+        timestampNs: Long,
+        surface: Surface,
+        mirrorHorizontally: Boolean = false,
+        extraBlurRadius: Float = 1.0f,
+        isMuted: Boolean = false
+    ) {
+        checkInitializedOrThrow(mInitialized, true)
+        checkGlThreadOrThrow(mGlThread)
+
+        if (isMuted || !mHasTransitionFrame || mTransitionTextureA == -1) {
+            render(timestampNs, IDENTITY_MATRIX, surface, isMuted = true)
+            return
+        }
+
+        var outputSurface: OutputSurface? = getOutSurfaceOrThrow(surface)
+        if (outputSurface === NO_OUTPUT_SURFACE) {
+            outputSurface = createOutputSurfaceInternal(surface)
+            if (outputSurface == null) {
+                return
+            }
+            mOutputSurfaceMap[surface] = outputSurface
+        }
+        requireNotNull(outputSurface)
+
+        if (surface !== mCurrentSurface) {
+            makeCurrent(outputSurface.eglSurface)
+            mCurrentSurface = surface
+        }
+
+        val surfaceSize = getSurfaceSize(mEglDisplay, outputSurface.eglSurface)
+        val targetW = surfaceSize.width.takeIf { it > 0 } ?: outputSurface.viewPortRect.width()
+        val targetH = surfaceSize.height.takeIf { it > 0 } ?: outputSurface.viewPortRect.height()
+
+        // Clear full surface first so letterbox/pillarbox bars are clean black
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glViewport(0, 0, targetW, targetH)
+        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+        // Compute aspect-preserving viewport from captured transition source aspect ratio
+        val viewport = computeTransitionViewport(targetW, targetH, mTransitionSourceAspectRatio)
+        GLES20.glViewport(viewport.left, viewport.top, viewport.width(), viewport.height())
+
+        val blurProgram = requireNotNull(mBlurProgram)
+        blurProgram.use()
+        mCurrentProgram = blurProgram
+        blurProgram.updateTextureMatrix(
+            if (mirrorHorizontally) mMirroredTransitionTexMatrix else IDENTITY_MATRIX
+        )
+        blurProgram.updateTexelOffset(
+            extraBlurRadius / mTransitionWidth.toFloat(),
+            extraBlurRadius / mTransitionHeight.toFloat()
+        )
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mTransitionTextureA)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        checkGlErrorOrThrow("glDrawArrays")
+
+        // Restore default state expected by [render]
+        mCurrentProgram = null
+        mCurrentSurface = null
+        useAndConfigureProgramWithTexture(mExternalTextureId)
+
+        EGLExt.eglPresentationTimeANDROID(mEglDisplay, outputSurface.eglSurface, timestampNs)
+        if (!EGL14.eglSwapBuffers(mEglDisplay, outputSurface.eglSurface)) {
+            Logger.w(
+                TAG, "Failed to swap buffers with EGL error: 0x" + Integer.toHexString(
+                    EGL14.eglGetError()
+                )
+            )
+            removeOutputSurfaceInternal(surface, false)
+        }
+    }
+
+    private fun computeTransitionViewport(
+        targetWidth: Int,
+        targetHeight: Int,
+        sourceRatio: Float
+    ): Rect {
+        if (sourceRatio <= 0f || targetWidth <= 0 || targetHeight <= 0) {
+            return Rect(0, 0, targetWidth, targetHeight)
+        }
+        val targetRatio = targetWidth.toFloat() / targetHeight.toFloat()
+        return if (sourceRatio > targetRatio) {
+            val newHeight = (targetWidth / sourceRatio).roundToInt()
+            val yOffset = (targetHeight - newHeight) / 2
+            Rect(0, yOffset, targetWidth, yOffset + newHeight)
+        } else if (sourceRatio < targetRatio) {
+            val newWidth = (targetHeight * sourceRatio).roundToInt()
+            val xOffset = (targetWidth - newWidth) / 2
+            Rect(xOffset, 0, xOffset + newWidth, targetHeight)
+        } else {
+            Rect(0, 0, targetWidth, targetHeight)
+        }
+    }
+
     // Returns a pair of GL extension (first) and EGL extension (second) strings.
     private fun getExtensionsBeforeInitialized(
         dynamicRangeToInitialize: DynamicRangeProfile
@@ -716,6 +1031,9 @@ class OpenGlRenderer {
     }
 
     private fun releaseInternal() {
+        releaseTransitionBuffers()
+        mBlurProgram?.delete()
+        mBlurProgram = null
         // Delete program
         for (program in mProgramHandles.values) {
             program.delete()
@@ -820,5 +1138,7 @@ class OpenGlRenderer {
 
     companion object {
         private const val TAG = "OpenGlRenderer"
+        private const val TRANSITION_FBO_MAX_DIM = 360
+        private const val INITIAL_BLUR_PING_PONG_PASSES = 3
     }
 }

@@ -57,6 +57,56 @@ internal class MultiInputCompositor(private val renderer: OpenGlRenderer) {
     }
 
     /**
+     * Builds the ordered list of [OpenGlRenderer.RenderInput]s for the given [output].
+     */
+    fun buildRenderInputs(
+        surfaceInputs: List<SurfaceInput>,
+        surfaceInputsToMatrixMap: Map<SurfaceTexture, FloatArray>,
+        output: SurfaceOutput,
+        resolver: IInputResolver,
+        hasUnmirroredOutput: Boolean = !output.needMirroring,
+        surfaceOutputMatrix: FloatArray? = null
+    ): List<OpenGlRenderer.RenderInput> {
+        val orderedInputs = surfaceInputs
+            .filter { it.hasFrame && resolver.getTargetRect(it.surface) != null }
+            .sortedBy { if (resolver.isSecondaryInput(it.surface)) 1 else 0 }
+        if (orderedInputs.isEmpty()) return emptyList()
+
+        return orderedInputs.mapIndexed { index, input ->
+            val rawTransform = surfaceInputsToMatrixMap[input.surfaceTexture] ?: FloatArray(16)
+            val rectNorm = resolver.getTargetRect(input.surface) ?: RectF(0f, 0f, 1f, 1f)
+            val infoProvider = resolver.getInfoProvider(input.surface)
+
+            val outputMatrix = FloatArray(16)
+            output.updateTransformMatrix(outputMatrix, rawTransform, infoProvider)
+
+            // Rects are relative to the output viewport, which may be letterboxed.
+            val viewport = output.viewportRect
+            val destWidth = rectNorm.width() * viewport.width()
+            val destHeight = rectNorm.height() * viewport.height()
+
+            val sourceSize = input.bufferSize
+            val rot = infoProvider.getRelativeRotationDegrees(output.targetRotation, infoProvider.isMirror)
+            val isRotated = (rot % 180) != 0
+            val sourceWidth = if (isRotated) sourceSize.height.toFloat() else sourceSize.width.toFloat()
+            val sourceHeight = if (isRotated) sourceSize.width.toFloat() else sourceSize.height.toFloat()
+
+            applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight)
+
+            // Snapshots follow the stream (not mirrored), not the mirrored preview output.
+            if (surfaceOutputMatrix != null && index == 0 && (!output.needMirroring || !hasUnmirroredOutput)) {
+                outputMatrix.copyInto(surfaceOutputMatrix)
+            }
+
+            OpenGlRenderer.RenderInput(
+                textureId = input.textureId,
+                textureTransform = outputMatrix,
+                targetRectNorm = rectNorm
+            )
+        }
+    }
+
+    /**
      * @param surfaceOutputMatrix receives the matrix used for snapshots
      */
     fun render(
@@ -68,48 +118,19 @@ internal class MultiInputCompositor(private val renderer: OpenGlRenderer) {
         isMuted: Boolean,
         surfaceOutputMatrix: FloatArray
     ) {
-        // Primary first, secondary (drawn on top) last; ignore inputs not owned by the resolver or without a frame yet.
-        val orderedInputs = surfaceInputs
-            .filter { it.hasFrame && resolver.getTargetRect(it.surface) != null }
-            .sortedBy { if (resolver.isSecondaryInput(it.surface)) 1 else 0 }
-        if (orderedInputs.isEmpty()) return
-
         val hasUnmirroredOutput = outputs.any { !it.needMirroring }
 
         outputs.forEach { output ->
             try {
-                val transformedInputs = orderedInputs.mapIndexed { index, input ->
-                    val rawTransform = surfaceInputsToMatrixMap[input.surfaceTexture] ?: FloatArray(16)
-                    val rectNorm = resolver.getTargetRect(input.surface) ?: RectF(0f, 0f, 1f, 1f)
-                    val infoProvider = resolver.getInfoProvider(input.surface)
-
-                    val outputMatrix = FloatArray(16)
-                    output.updateTransformMatrix(outputMatrix, rawTransform, infoProvider)
-
-                    // Rects are relative to the output viewport, which may be letterboxed.
-                    val viewport = output.viewportRect
-                    val destWidth = rectNorm.width() * viewport.width()
-                    val destHeight = rectNorm.height() * viewport.height()
-
-                    val sourceSize = input.bufferSize
-                    val rot = infoProvider.getRelativeRotationDegrees(output.targetRotation, infoProvider.isMirror)
-                    val isRotated = (rot % 180) != 0
-                    val sourceWidth = if (isRotated) sourceSize.height.toFloat() else sourceSize.width.toFloat()
-                    val sourceHeight = if (isRotated) sourceSize.width.toFloat() else sourceSize.height.toFloat()
-
-                    applyAspectCrop(outputMatrix, sourceWidth, sourceHeight, destWidth, destHeight)
-
-                    // Snapshots follow the stream (not mirrored), not the mirrored preview output.
-                    if (index == 0 && (!output.needMirroring || !hasUnmirroredOutput)) {
-                        outputMatrix.copyInto(surfaceOutputMatrix)
-                    }
-
-                    OpenGlRenderer.RenderInput(
-                        textureId = input.textureId,
-                        textureTransform = outputMatrix,
-                        targetRectNorm = rectNorm
-                    )
-                }
+                val transformedInputs = buildRenderInputs(
+                    surfaceInputs = surfaceInputs,
+                    surfaceInputsToMatrixMap = surfaceInputsToMatrixMap,
+                    output = output,
+                    resolver = resolver,
+                    hasUnmirroredOutput = hasUnmirroredOutput,
+                    surfaceOutputMatrix = surfaceOutputMatrix
+                )
+                if (transformedInputs.isEmpty()) return@forEach
 
                 if (output.isStreaming()) {
                     renderer.renderInputs(
