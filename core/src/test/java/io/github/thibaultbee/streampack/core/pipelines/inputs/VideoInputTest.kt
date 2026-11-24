@@ -7,6 +7,8 @@ import io.github.thibaultbee.streampack.core.elements.processing.video.ISurfaceP
 import io.github.thibaultbee.streampack.core.elements.processing.video.ISurfaceProcessorInternal
 import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.sources.video.IPreviewableSource
+import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProcessorAwareSource
+import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceSourceInternal
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal
 import io.github.thibaultbee.streampack.core.elements.sources.video.VideoSourceConfig
@@ -16,8 +18,10 @@ import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
 import io.github.thibaultbee.streampack.core.utils.InternalStreamPackApi
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.coVerifyOrder
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -34,8 +38,14 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class VideoInputTest {
     interface PreviewableVideoSource : IVideoSourceInternal, IPreviewableSource
+    interface ProcessorAwarePreviewableSource :
+        IVideoSourceInternal,
+        IPreviewableSource,
+        ISurfaceSourceInternal,
+        ISurfaceProcessorAwareSource
 
     private lateinit var videoInput: VideoInput
+    private lateinit var processor: ISurfaceProcessorInternal
     private lateinit var previewSurfaceProvider: IPreviewSurfaceProvider
 
     init {
@@ -44,8 +54,9 @@ class VideoInputTest {
 
     @Before
     fun setUp() {
+        processor = mockk<ISurfaceProcessorInternal>(relaxed = true)
         val processorFactory = mockk<ISurfaceProcessor.Factory> {
-            every { create(any(), any(), any()) } returns mockk<ISurfaceProcessorInternal>(relaxed = true)
+            every { create(any(), any(), any()) } returns processor
         }
         val dispatcherProvider = mockk<IVideoDispatcherProvider>(relaxed = true) {
             every { default } returns Dispatchers.Unconfined
@@ -115,5 +126,40 @@ class VideoInputTest {
 
             coVerify(exactly = 1) { previewSurfaceProvider.onPreparePreview(any()) }
             assertEquals(config, videoInput.sourceConfigFlow.value)
+        }
+
+    @Test
+    fun `setSource starts processor transition and preserves preview output when switching between processor-aware sources while previewing`() =
+        runTest {
+            val firstSource = mockk<ProcessorAwarePreviewableSource>(relaxed = true) {
+                every { infoProviderFlow } returns MutableStateFlow<ISourceInfoProvider>(mockk(relaxed = true))
+                every { isStreamingFlow } returns MutableStateFlow(false)
+                every { isPreviewingFlow } returns MutableStateFlow(true)
+            }
+            val firstFactory = mockk<ISurfaceProcessorAwareSource.Factory> {
+                every { isSourceEquals(any()) } returns false
+                every { isConfigurationSupported(any(), any()) } returns true
+                coEvery { create(any(), any()) } returns firstSource
+            }
+            val secondSource = mockk<ProcessorAwarePreviewableSource>(relaxed = true) {
+                every { infoProviderFlow } returns MutableStateFlow<ISourceInfoProvider>(mockk(relaxed = true))
+                every { isStreamingFlow } returns MutableStateFlow(false)
+                every { isPreviewingFlow } returns MutableStateFlow(true)
+            }
+            val secondFactory = mockk<ISurfaceProcessorAwareSource.Factory> {
+                every { isSourceEquals(any()) } returns false
+                every { isConfigurationSupported(any(), any()) } returns true
+                coEvery { create(any(), any()) } returns secondSource
+            }
+
+            videoInput.setSourceConfig(VideoSourceConfig(resolution = Size(1920, 1080), fps = 30))
+            videoInput.setSource(firstFactory)
+            videoInput.setSource(secondFactory)
+
+            coVerifyOrder {
+                processor.startTransition(30)
+                firstSource.releaseKeepingPreviewOutput()
+            }
+            coVerify(exactly = 0) { firstSource.release() }
         }
 }

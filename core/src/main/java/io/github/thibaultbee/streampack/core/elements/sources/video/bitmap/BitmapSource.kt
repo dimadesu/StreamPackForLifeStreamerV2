@@ -21,12 +21,14 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.util.Size
 import android.view.Surface
+import io.github.thibaultbee.streampack.core.elements.processing.video.ISurfaceProcessorInternal
 import io.github.thibaultbee.streampack.core.elements.processing.video.source.DefaultSourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.processing.video.source.ISourceInfoProvider
 import io.github.thibaultbee.streampack.core.elements.sources.video.AbstractPreviewableSource
+import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceProcessorAwareSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.ISurfaceSourceInternal
-import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal
+import io.github.thibaultbee.streampack.core.elements.sources.video.SurfaceProcessorPreviewHelper
 import io.github.thibaultbee.streampack.core.elements.sources.video.VideoSourceConfig
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
@@ -43,9 +45,13 @@ import kotlin.random.Random
  */
 // TODO: move to coroutines instead of ExecutorService
 @OptIn(InternalStreamPackApi::class)
-internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSource(),
+internal class BitmapSource(
+    context: Context,
+    override val bitmap: Bitmap
+) : AbstractPreviewableSource(),
     IVideoSourceInternal,
     ISurfaceSourceInternal,
+    ISurfaceProcessorAwareSource,
     IBitmapSource {
     override val timebase = Timebase.UPTIME
     override val infoProviderFlow =
@@ -54,13 +60,9 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
     private var videoSourceConfig: VideoSourceConfig? = null
 
     private var outputSurface: Surface? = null
-    private var previewSurface: Surface? = null
 
     private val outputExecutor = Executors.newSingleThreadScheduledExecutor()
     private var outputScheduler: Future<*>? = null
-
-    private val previewExecutor = Executors.newSingleThreadScheduledExecutor()
-    private var previewScheduler: Future<*>? = null
 
     private val _isStreamingFlow = MutableStateFlow(false)
     override val isStreamingFlow = _isStreamingFlow.asStateFlow()
@@ -68,54 +70,88 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
     private val _isPreviewingFlow = MutableStateFlow(false)
     override val isPreviewingFlow = _isPreviewingFlow.asStateFlow()
 
+    @Volatile
+    private var isStreamRequested = false
+    @Volatile
+    private var isPreviewRequested = false
+    private val drawLock = Any()
+
     private var scaledBitmap: Bitmap? = null
 
     private val activeBitmap: Bitmap
         get() = scaledBitmap?.takeIf { !it.isRecycled } ?: bitmap
 
-    /**
-     * Gets the size of the bitmap.
-     */
-    override fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size {
-        val current = activeBitmap
-        return Size(current.width, current.height)
+    private val previewHelper = SurfaceProcessorPreviewHelper(
+        context = context,
+        infoProvider = { infoProviderFlow.value },
+        isStreaming = { _isPreviewingFlow.value },
+        needMirroring = { false },
+        configuredInputSize = {
+            val current = activeBitmap
+            Size(current.width, current.height)
+        }
+    )
+
+    override fun setSurfaceProcessor(processor: ISurfaceProcessorInternal) {
+        previewHelper.setSurfaceProcessor(processor)
     }
 
-    override suspend fun hasPreview() = previewSurface != null
+    /**
+     * Gets the preview size from [targetSize] so the preview surface matches the main
+     * [SurfaceProcessor] canvas and can be reused seamlessly across source switches.
+     */
+    override fun <T> getPreviewSize(targetSize: Size, targetClass: Class<T>): Size {
+        return if (targetSize.width > 0 && targetSize.height > 0) {
+            previewHelper.selectPreviewSize(targetSize)
+        } else {
+            val current = activeBitmap
+            previewHelper.selectPreviewSize(Size(current.width, current.height))
+        }
+    }
+
+    override suspend fun hasPreview() = previewHelper.hasPreview()
 
     override suspend fun setPreview(surface: Surface) {
-        previewSurface = surface
+        previewHelper.setPreview(surface) {
+            val current = activeBitmap
+            Size(current.width, current.height)
+        }
     }
 
     override suspend fun startPreview() {
-        requireNotNull(previewSurface) { "Preview surface must be set before starting preview" }
-
+        isPreviewRequested = true
         _isPreviewingFlow.emit(true)
-        previewScheduler = previewExecutor.scheduleWithFixedDelay(
-            ::drawPreview,
-            0,
-            1000, // 1 frame per second. We don't need more for preview.
-            TimeUnit.MILLISECONDS
-        )
+        syncDrawLoop()
     }
 
     override suspend fun stopPreview() {
-        previewScheduler?.cancel(true)
+        isPreviewRequested = false
         _isPreviewingFlow.emit(false)
+        syncDrawLoop()
     }
 
     override suspend fun resetPreviewImpl() {
         stopPreview()
-        previewSurface = null
+        previewHelper.resetPreview()
     }
 
     override suspend fun getOutput(): Surface? = outputSurface
     override suspend fun setOutput(surface: Surface) {
         outputSurface = surface
+        previewHelper.attachIfReady()
+        syncDrawLoop()
     }
 
     override suspend fun resetOutputImpl() {
-        stopStream()
+        resetOutputInternal(keepPreviewOutputOnProcessor = false)
+    }
+
+    private fun resetOutputInternal(keepPreviewOutputOnProcessor: Boolean) {
+        if (!keepPreviewOutputOnProcessor) {
+            previewHelper.detachOutput()
+        }
+        outputScheduler?.cancel(true)
+        outputScheduler = null
         outputSurface = null
     }
 
@@ -148,43 +184,68 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
             scaledBitmap?.recycle()
             scaledBitmap = null
         }
+        previewHelper.refreshIfAttached()
+    }
+
+    private fun syncDrawLoop() {
+        synchronized(drawLock) {
+            val isNeeded = (isStreamRequested || isPreviewRequested) && outputSurface != null
+            if (isNeeded && (outputScheduler == null || outputScheduler?.isDone == true)) {
+                val fps = (videoSourceConfig?.fps ?: 15).coerceAtLeast(1)
+                outputScheduler = outputExecutor.scheduleAtFixedRate(
+                    ::drawOutput,
+                    0,
+                    1_000_000_000L / fps.toLong(),
+                    TimeUnit.NANOSECONDS
+                )
+            } else if (!isNeeded) {
+                outputScheduler?.cancel(true)
+                outputScheduler = null
+            }
+        }
     }
 
     override suspend fun startStream() {
-        val sourceConfig =
-            requireNotNull(videoSourceConfig) { "Video source must be configured before starting stream" }
+        requireNotNull(videoSourceConfig) { "Video source must be configured before starting stream" }
         requireNotNull(outputSurface) { "Output surface must be set before starting stream" }
 
+        isStreamRequested = true
         _isStreamingFlow.emit(true)
-        outputScheduler = outputExecutor.scheduleAtFixedRate(
-            ::drawOutput,
-            0,
-            1_000_000_000L / sourceConfig.fps.toLong(),
-            TimeUnit.NANOSECONDS
-        )
+        syncDrawLoop()
     }
 
     override suspend fun stopStream() {
-        outputScheduler?.cancel(true)
+        isStreamRequested = false
         _isStreamingFlow.emit(false)
+        syncDrawLoop()
     }
 
     override suspend fun release() {
+        releaseInternal(keepPreviewOutputOnProcessor = false)
+    }
+
+    override suspend fun releaseKeepingPreviewOutput() {
+        resetOutputInternal(keepPreviewOutputOnProcessor = true)
+        releaseInternal(keepPreviewOutputOnProcessor = true)
+    }
+
+    private fun releaseInternal(keepPreviewOutputOnProcessor: Boolean) {
+        isStreamRequested = false
+        isPreviewRequested = false
+        previewHelper.release(keepOutputOnProcessor = keepPreviewOutputOnProcessor)
         // Stop any scheduled tasks first
         outputScheduler?.cancel(true)
-        previewScheduler?.cancel(true)
-        
+        outputScheduler = null
+
         // Shutdown executors and wait for them to finish
         outputExecutor.shutdown()
-        previewExecutor.shutdown()
         try {
             // Wait for executors to finish any in-progress drawing
             outputExecutor.awaitTermination(500, TimeUnit.MILLISECONDS)
-            previewExecutor.awaitTermination(500, TimeUnit.MILLISECONDS)
         } catch (e: InterruptedException) {
             // Ignore
         }
-        
+
         // Now safe to recycle pre-composited bitmaps and scaled bitmap
         compositedBitmaps.forEach { it.recycle() }
         compositedBitmaps.clear()
@@ -269,20 +330,6 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
         }
     }
 
-    private fun drawPreview() {
-        previewSurface?.let {
-            try {
-                val bitmapToDraw = activeBitmap
-                if (bitmapToDraw.isRecycled) return@let
-                val canvas = it.lockHardwareCanvas() ?: return@let
-                canvas.drawBitmap(bitmapToDraw, 0f, 0f, null)
-                it.unlockCanvasAndPost(canvas)
-            } catch (e: Exception) {
-                // Ignore drawing errors
-            }
-        }
-    }
-
     private inner class SourceInfoProvider : DefaultSourceInfoProvider(rotationDegrees = 0) {
         override fun getSurfaceSize(targetResolution: Size): Size {
             val current = activeBitmap
@@ -297,12 +344,12 @@ internal class BitmapSource(override val bitmap: Bitmap) : AbstractPreviewableSo
  * @param bitmap the [Bitmap] to stream.
  */
 @OptIn(InternalStreamPackApi::class)
-class BitmapSourceFactory(private val bitmap: Bitmap) : IVideoSource.Factory {
+class BitmapSourceFactory(private val bitmap: Bitmap) : ISurfaceProcessorAwareSource.Factory {
     override suspend fun create(
         context: Context,
         dispatcherProvider: IVideoDispatcherProvider
     ): IVideoSourceInternal {
-        return BitmapSource(bitmap)
+        return BitmapSource(context, bitmap)
     }
 
     override fun isSourceEquals(source: IVideoSourceInternal?): Boolean {

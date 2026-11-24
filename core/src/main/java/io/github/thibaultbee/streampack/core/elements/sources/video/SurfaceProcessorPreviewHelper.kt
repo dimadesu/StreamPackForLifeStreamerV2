@@ -167,6 +167,19 @@ class SurfaceProcessorPreviewHelper(
             infoProvider().getRelativeRotationDegrees(context.displayRotation, false)
         )
 
+    private fun computeEffectiveInputSize(
+        baseProvider: ISourceInfoProvider,
+        rotation: Int,
+        fallbackPreviewSize: Size
+    ): Size {
+        val rawInputSize = configuredInputSize()
+        return if (rawInputSize != null) {
+            rawInputSize
+        } else {
+            fallbackPreviewSize.rotate(baseProvider.getRelativeRotationDegrees(rotation, false))
+        }
+    }
+
     private fun scalePreviewSize(uprightSize: Size, targetSize: Size? = null): Size {
         val capScale = maxPreviewDimension.toFloat() / maxOf(uprightSize.width, uprightSize.height)
         val scale = if (targetSize != null && targetSize.width > 0 && targetSize.height > 0) {
@@ -209,8 +222,7 @@ class SurfaceProcessorPreviewHelper(
 
         val rotation = context.displayRotation
         val baseProvider = infoProvider()
-        val effectiveInputSize = configuredInputSize()
-            ?: size.rotate(baseProvider.getRelativeRotationDegrees(rotation, false))
+        val effectiveInputSize = computeEffectiveInputSize(baseProvider, rotation, size)
         val mirroring = needMirroring()
 
         if (attachment?.matches(
