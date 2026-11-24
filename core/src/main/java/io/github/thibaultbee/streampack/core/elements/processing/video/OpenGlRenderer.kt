@@ -216,6 +216,33 @@ class OpenGlRenderer {
     }
 
     /**
+     * Updates the viewport rect of an already-registered output surface without destroying its
+     * [EGLSurface], so reusing the same [Surface] across video sources does not recreate the
+     * window surface.
+     */
+    fun updateOutputSurfaceViewport(surface: Surface, viewportRect: Rect? = null) {
+        checkInitializedOrThrow(mInitialized, true)
+        checkGlThreadOrThrow(mGlThread)
+
+        if (viewportRect != null) {
+            mViewportRectMap[surface] = viewportRect
+        } else {
+            mViewportRectMap.remove(surface)
+        }
+        val current = mOutputSurfaceMap[surface]
+        if (current != null && current !== NO_OUTPUT_SURFACE) {
+            val resolvedRect = viewportRect ?: run {
+                val size = getSurfaceSize(mEglDisplay, current.eglSurface)
+                Rect(0, 0, size.width, size.height)
+            }
+            mOutputSurfaceMap[surface] = OutputSurface(current.eglSurface, resolvedRect)
+            if (mCurrentSurface === surface) {
+                mCurrentSurface = null
+            }
+        }
+    }
+
+    /**
      * Unregister the output surface.
      *
      * @throws IllegalStateException if the renderer is not initialized or the caller doesn't run

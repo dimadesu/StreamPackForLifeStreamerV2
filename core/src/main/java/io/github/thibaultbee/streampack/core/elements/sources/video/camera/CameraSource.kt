@@ -225,10 +225,17 @@ internal class CameraSource(
     }
 
     @SuppressLint("MissingPermission")
-    override suspend fun resetOutputImpl() = withContext(defaultDispatcher) {
-        // Keep previewSurface intact so StreamPack's resolution reconfiguration
-        // (resetOutput -> configure -> setSurfaceProcessor -> setOutput) re-attaches it.
-        previewHelper.detachOutput()
+    override suspend fun resetOutputImpl() {
+        resetOutputInternal(keepPreviewOutputOnProcessor = false)
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun resetOutputInternal(keepPreviewOutputOnProcessor: Boolean) = withContext(defaultDispatcher) {
+        if (!keepPreviewOutputOnProcessor) {
+            // Keep previewSurface intact so StreamPack's resolution reconfiguration
+            // (resetOutput -> configure -> setSurfaceProcessor -> setOutput) re-attaches it.
+            previewHelper.detachOutput()
+        }
         streamMutex.withLock {
             isExpectingSessionClose = controller.isActiveFlow.value
             executeIfCameraPermission {
@@ -344,7 +351,16 @@ internal class CameraSource(
         }
 
     override suspend fun release() {
-        previewHelper.release()
+        releaseInternal(keepPreviewOutputOnProcessor = false)
+    }
+
+    override suspend fun releaseKeepingPreviewOutput() {
+        resetOutputInternal(keepPreviewOutputOnProcessor = true)
+        releaseInternal(keepPreviewOutputOnProcessor = true)
+    }
+
+    private suspend fun releaseInternal(keepPreviewOutputOnProcessor: Boolean) {
+        previewHelper.release(keepOutputOnProcessor = keepPreviewOutputOnProcessor)
         streamMutex.withLock {
             isStreamRequested = false
             isPreviewRequested = false

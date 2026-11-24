@@ -261,9 +261,14 @@ private class DefaultSurfaceProcessor(
             if (isReleaseRequested.get()) {
                 throw IllegalStateException("SurfaceProcessor is released")
             }
-            if (!surfaceOutputs.map { it.targetSurface }.contains(surfaceOutput.targetSurface)) {
+            val existing = surfaceOutputs.firstOrNull { it.targetSurface == surfaceOutput.targetSurface }
+            if (existing == null) {
                 renderer.registerOutputSurface(surfaceOutput.targetSurface, surfaceOutput.viewportRect)
                 surfaceOutputs.add(surfaceOutput)
+            } else if (existing !== surfaceOutput) {
+                renderer.updateOutputSurfaceViewport(surfaceOutput.targetSurface, surfaceOutput.viewportRect)
+                val index = surfaceOutputs.indexOf(existing)
+                surfaceOutputs[index] = surfaceOutput
             } else {
                 Logger.w(TAG, "Surface already added")
             }

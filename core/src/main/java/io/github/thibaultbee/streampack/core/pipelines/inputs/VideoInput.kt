@@ -207,6 +207,9 @@ internal class VideoInput(
                     }
                     val previousVideoSource = sourceInternalFlow.value
                     val isStreaming = previousVideoSource?.isStreamingFlow?.value ?: false
+                    val isPreviewingBeforeSwitch =
+                        (previousVideoSource as? IPreviewableSource)?.isPreviewingFlow?.value
+                            ?: false
 
                     if (videoSourceFactory.isSourceEquals(previousVideoSource)) {
                         Logger.i(TAG, "Video source is already set, skipping")
@@ -230,7 +233,7 @@ internal class VideoInput(
                         )
                     }
 
-                    if (isStreaming) {
+                    if (previousVideoSource != null && (isStreaming || isPreviewingBeforeSwitch)) {
                         try {
                             processor.startTransition(sourceConfig?.fps ?: 30)
                             transitionStarted = true
@@ -247,6 +250,9 @@ internal class VideoInput(
                             videoSourceFactory is ISurfaceProcessorAwareSource.Factory ||
                             (previousVideoSource is CameraSource && videoSourceFactory is CameraSourceFactory)
                         )
+                    val reusePreviewSurfaceOnProcessor =
+                        previousVideoSource is ISurfaceProcessorAwareSource &&
+                        videoSourceFactory is ISurfaceProcessorAwareSource.Factory
                     if (wasReleasedEarly) {
                         /**
                          * It is not possible to have 2 camera sources at the same time because of
@@ -269,32 +275,47 @@ internal class VideoInput(
                                 null
                             }
                         }
-                        try {
-                            previousVideoSource.release()
-                        } catch (t: Throwable) {
-                            Logger.w(
-                                TAG,
-                                "setVideoSource: Can't release previous video source: ${t.message}"
-                            )
-                        }
-                        if (previousVideoSource is ISurfaceSourceInternal) {
+                        if (!reusePreviewSurfaceOnProcessor) {
                             try {
-                                previousVideoSource.resetOutput()
+                                previousVideoSource.release()
                             } catch (t: Throwable) {
                                 Logger.w(
                                     TAG,
-                                    "setVideoSource: Can't reset previous video source output: ${t.message}"
+                                    "setVideoSource: Can't release previous video source: ${t.message}"
                                 )
                             }
-                            previousSurface?.let {
+                            if (previousVideoSource is ISurfaceSourceInternal) {
                                 try {
-                                    processor.removeInputSurface(it)
+                                    previousVideoSource.resetOutput()
                                 } catch (t: Throwable) {
                                     Logger.w(
                                         TAG,
-                                        "setVideoSource: Can't remove previous input surface: ${t.message}"
+                                        "setVideoSource: Can't reset previous video source output: ${t.message}"
                                     )
                                 }
+                            }
+                        } else {
+                            // Release camera hardware immediately while keeping the preview output
+                            // registered on the processor so the transition loop can keep rendering
+                            // blurred frames onto the preview surface until the incoming source
+                            // replaces it in-place.
+                            try {
+                                (previousVideoSource as ISurfaceProcessorAwareSource).releaseKeepingPreviewOutput()
+                            } catch (t: Throwable) {
+                                Logger.w(
+                                    TAG,
+                                    "setVideoSource: Can't release previous video source: ${t.message}"
+                                )
+                            }
+                        }
+                        previousSurface?.let {
+                            try {
+                                processor.removeInputSurface(it)
+                            } catch (t: Throwable) {
+                                Logger.w(
+                                    TAG,
+                                    "setVideoSource: Can't remove previous input surface: ${t.message}"
+                                )
                             }
                         }
                     }
@@ -414,6 +435,11 @@ internal class VideoInput(
 
                     // Replace video source
                     sourceInternalFlow.emit(newVideoSource)
+                    if (transitionStarted && !isStreaming && newVideoSource !is IPreviewableSource) {
+                        try {
+                            processor.stopTransition()
+                        } catch (_: Throwable) {}
+                    }
                 }
             } catch (t: Throwable) {
                 if (transitionStarted) {
@@ -681,11 +707,15 @@ internal class VideoInput(
         infoProvider: ISourceInfoProvider? = source?.infoProviderFlow?.value,
         videoSourceConfig: VideoSourceConfig? = sourceConfig
     ) {
-        pipelineOutputSurfaces.forEach {
-            processor.removeOutputSurface(it)
-        }
+        val oldOutputs = ArrayList(pipelineOutputSurfaces)
         pipelineOutputSurfaces.clear()
         addOutputSurfacesUnsafe(infoProvider, videoSourceConfig)
+        val newTargetSurfaces = pipelineOutputSurfaces.map { it.targetSurface }.toSet()
+        oldOutputs.forEach { oldOutput ->
+            if (!newTargetSurfaces.contains(oldOutput.targetSurface)) {
+                processor.removeOutputSurface(oldOutput)
+            }
+        }
     }
 
     private suspend fun updateOutputSurfaces(

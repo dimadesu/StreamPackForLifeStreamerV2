@@ -219,7 +219,10 @@ class PreviewView @JvmOverloads constructor(
                         Logger.w(TAG, "No change in video source")
                     } else {
                         defaultScope.launch {
-                            if (previousVideoSource is IPreviewableSource) {
+                            if (previousVideoSource is IPreviewableSource &&
+                                !(previousVideoSource is ISurfaceProcessorAwareSource &&
+                                    newVideoSource is ISurfaceProcessorAwareSource)
+                            ) {
                                 previousVideoSource.previewMutex.withLock {
                                     previousVideoSource.stopPreview()
                                     previousVideoSource.resetPreview()
@@ -317,6 +320,9 @@ class PreviewView @JvmOverloads constructor(
                 lastRequestedSize = null
                 lastRequestedRotation = null
                 lastRequestedVideoSource = null
+                currentPreviewSurface = null
+                currentPreviewSurfaceSize = null
+                currentPreviewSourceIsDirectCamera = false
 
                 streamer = newStreamer
                 if (newStreamer != null) {
@@ -521,6 +527,31 @@ class PreviewView @JvmOverloads constructor(
     private var lastRequestedSize: Size? = null
     private var lastRequestedRotation: Int? = null
     private var lastRequestedVideoSource: IPreviewableSource? = null
+    private var currentPreviewSurface: Surface? = null
+    private var currentPreviewSurfaceSize: Size? = null
+    private var currentPreviewSourceIsDirectCamera: Boolean = false
+
+    private fun canReuseCurrentPreviewSurface(
+        videoSource: IPreviewableSource,
+        size: Size
+    ): Boolean {
+        val surface = currentPreviewSurface ?: return false
+        if (!surface.isValid) return false
+        if (!isAttachedToWindow || windowVisibility != VISIBLE || !isShown || display == null) {
+            return false
+        }
+        val isDirectCamera =
+            videoSource is ICameraSource && videoSource !is ISurfaceProcessorAwareSource
+        if (isDirectCamera || currentPreviewSourceIsDirectCamera) {
+            return false
+        }
+        val currentRotation = display.rotation
+        if (size != lastRequestedSize || currentRotation != lastRequestedRotation) {
+            return false
+        }
+        val previewSize = getPreviewSize(videoSource, size)
+        return previewSize == currentPreviewSurfaceSize
+    }
 
     private fun createViewfinderRequestBuilder(
         videoSource: IPreviewableSource,
@@ -540,9 +571,13 @@ class PreviewView @JvmOverloads constructor(
         lastRequestedVideoSource = videoSource
 
         val previewSize = getPreviewSize(videoSource, size)
+        currentPreviewSurfaceSize = previewSize
+        val isDirectCamera =
+            videoSource is ICameraSource && videoSource !is ISurfaceProcessorAwareSource
+        currentPreviewSourceIsDirectCamera = isDirectCamera
         Logger.i(TAG, "Preparing preview with size ($previewSize) for ($size)")
         val builder = ViewfinderSurfaceRequest.Builder(previewSize)
-        if (videoSource is ICameraSource && videoSource !is ISurfaceProcessorAwareSource) {
+        if (isDirectCamera) {
             val cameraCharacteristics =
                 context.getCameraCharacteristics(videoSource.cameraId)
             builder.populateFromCharacteristics(cameraCharacteristics)
@@ -573,16 +608,82 @@ class PreviewView @JvmOverloads constructor(
     }
 
     override suspend fun onSourceSwitchingStart(previousVideoSource: IVideoSource?) {
-        setCoverVisible(true)
+        // Processor-aware sources render a blurred transition directly onto the preview surface
+        // via DefaultSurfaceProcessor, so keep the viewfinder visible. Only show the black cover
+        // when switching from a non-processor-aware source.
+        if (previousVideoSource !is ISurfaceProcessorAwareSource) {
+            withContext(mainDispatcher) {
+                coverView.visibility = VISIBLE
+            }
+        }
     }
 
     override suspend fun onPreparePreview(videoSource: IPreviewableSource) {
+        if (videoSource is ISurfaceProcessorAwareSource) {
+            val reusableSurface = withContext(mainDispatcher) {
+                if (canReuseCurrentPreviewSurface(videoSource, size)) {
+                    lastRequestedVideoSource = videoSource
+                    currentPreviewSurface
+                } else {
+                    null
+                }
+            }
+            if (reusableSurface != null) {
+                startPreviewJob.cancel()
+                startPreviewWithExistingSurface(videoSource, reusableSurface)
+                return
+            }
+        }
+
         val builder = withContext(mainDispatcher) {
             createViewfinderRequestBuilder(videoSource, size)
         } ?: return
 
         startPreviewJob.cancel()
         startPreview(videoSource, builder)
+    }
+
+    private suspend fun startPreviewWithExistingSurface(
+        videoSource: IPreviewableSource,
+        surface: Surface
+    ) {
+        var safetyTimeoutJob: Job? = null
+        try {
+            Logger.d(TAG, "Starting preview with existing surface")
+            var isFirstFrameHandled = false
+            val onFirstFrame = {
+                if (!isFirstFrameHandled) {
+                    isFirstFrameHandled = true
+                    setCoverVisible(false)
+                    listener?.onFirstFrame()
+                }
+            }
+
+            safetyTimeoutJob = defaultScope.launch {
+                delay(1500)
+                onFirstFrame()
+            }
+
+            videoSource.setOnFirstFrameListener {
+                safetyTimeoutJob.cancel()
+                onFirstFrame()
+            }
+
+            videoSource.previewMutex.withLock {
+                videoSource.startPreview(surface)
+            }
+            Logger.d(TAG, "Preview started on existing surface")
+            listener?.onPreviewStarted()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            safetyTimeoutJob?.cancel()
+            Logger.d(TAG, "Start preview cancelled")
+            throw e
+        } catch (t: Throwable) {
+            safetyTimeoutJob?.cancel()
+            Logger.e(TAG, "Failed to start preview on existing surface: $t")
+            setCoverVisible(false)
+            listener?.onPreviewFailed(t)
+        }
     }
 
     private suspend fun startPreview(
@@ -656,7 +757,9 @@ class PreviewView @JvmOverloads constructor(
             val viewfinderRequest = viewfinderBuilder.build().apply {
                 viewfinderSurfaceRequest = this
             }
-            viewfinder.requestSurface(viewfinderRequest)
+            viewfinder.requestSurface(viewfinderRequest).also {
+                currentPreviewSurface = it
+            }
         }
     }
 
@@ -675,6 +778,9 @@ class PreviewView @JvmOverloads constructor(
         }
         viewfinderSurfaceRequest?.markSurfaceSafeToRelease()
         viewfinderSurfaceRequest = null
+        currentPreviewSurface = null
+        currentPreviewSurfaceSize = null
+        currentPreviewSourceIsDirectCamera = false
         
         lastRequestedSize = null
         lastRequestedRotation = null

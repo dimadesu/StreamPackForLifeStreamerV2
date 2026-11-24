@@ -136,9 +136,18 @@ class SurfaceProcessorPreviewHelper(
         }
     }
 
-    fun release() {
+    /**
+     * Releases helper state without detaching the preview output from the processor if [keepOutputOnProcessor]
+     * is true (used when handing off the same preview surface to the next processor-aware source during
+     * a transition so the processor can keep rendering transition frames uninterrupted).
+     */
+    fun release(keepOutputOnProcessor: Boolean = false) {
         synchronized(lock) {
-            detachLocked()
+            if (!keepOutputOnProcessor) {
+                detachLocked()
+            } else {
+                attachment = null
+            }
             surfaceProcessor = null
             previewSurface = null
             previewSize = null

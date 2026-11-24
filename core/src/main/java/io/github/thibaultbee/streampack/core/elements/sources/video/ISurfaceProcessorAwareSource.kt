@@ -14,6 +14,13 @@ interface ISurfaceProcessorAwareSource {
     fun setSurfaceProcessor(processor: ISurfaceProcessorInternal)
 
     /**
+     * Releases the source while optionally keeping its preview output registered on the
+     * shared [ISurfaceProcessorInternal] so the transition render loop can continue rendering
+     * onto the preview surface until the incoming source replaces it in-place.
+     */
+    suspend fun releaseKeepingPreviewOutput() {}
+
+    /**
      * Marker interface for factories creating an [ISurfaceProcessorAwareSource].
      */
     @SubclassOptInRequired(InternalStreamPackApi::class)
