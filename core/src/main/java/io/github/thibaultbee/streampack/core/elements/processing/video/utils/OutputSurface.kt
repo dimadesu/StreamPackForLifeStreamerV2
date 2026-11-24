@@ -25,7 +25,9 @@ import android.opengl.EGLSurface
 fun OutputSurface(eglSurface: EGLSurface, width: Int, height: Int) =
     OutputSurface(
         eglSurface,
-        Rect(0, 0, width, height)
+        Rect(0, 0, width, height),
+        width,
+        height
     )
 
 /**
@@ -42,4 +44,23 @@ data class OutputSurface(
      * Gets the [Rect] that defines the viewport.
      */
     val viewPortRect: Rect,
-)
+
+    /**
+     * Full width of the underlying [EGLSurface].
+     */
+    val width: Int = viewPortRect.width(),
+
+    /**
+     * Full height of the underlying [EGLSurface].
+     */
+    val height: Int = viewPortRect.height(),
+) {
+    /**
+     * True when [viewPortRect] does not cover the entire [EGLSurface] (letterboxed or pillarboxed).
+     */
+    val isLetterboxed: Boolean
+        get() = viewPortRect.left > 0 ||
+            viewPortRect.top > 0 ||
+            viewPortRect.width() < width ||
+            viewPortRect.height() < height
+}

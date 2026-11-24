@@ -231,11 +231,9 @@ class OpenGlRenderer {
         }
         val current = mOutputSurfaceMap[surface]
         if (current != null && current !== NO_OUTPUT_SURFACE) {
-            val resolvedRect = viewportRect ?: run {
-                val size = getSurfaceSize(mEglDisplay, current.eglSurface)
-                Rect(0, 0, size.width, size.height)
-            }
-            mOutputSurfaceMap[surface] = OutputSurface(current.eglSurface, resolvedRect)
+            val resolvedRect = viewportRect ?: Rect(0, 0, current.width, current.height)
+            mOutputSurfaceMap[surface] =
+                OutputSurface(current.eglSurface, resolvedRect, current.width, current.height)
             if (mCurrentSurface === surface) {
                 mCurrentSurface = null
             }
@@ -353,25 +351,26 @@ class OpenGlRenderer {
         if (surface !== mCurrentSurface) {
             makeCurrent(outputSurface.eglSurface)
             mCurrentSurface = surface
+        }
+
+        if (isMuted) {
+            GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+            GLES20.glViewport(0, 0, outputSurface.width, outputSurface.height)
+            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        } else {
+            if (outputSurface.isLetterboxed) {
+                GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+                GLES20.glViewport(0, 0, outputSurface.width, outputSurface.height)
+                GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            }
             GLES20.glViewport(
                 outputSurface.viewPortRect.left,
                 outputSurface.viewPortRect.top,
                 outputSurface.viewPortRect.width(),
                 outputSurface.viewPortRect.height()
             )
-            GLES20.glScissor(
-                outputSurface.viewPortRect.left,
-                outputSurface.viewPortRect.top,
-                outputSurface.viewPortRect.width(),
-                outputSurface.viewPortRect.height()
-            )
-        }
-
-
-        if (isMuted) {
-            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        } else {
             useAndConfigureProgramWithTexture(textureId)
             // TODO(b/245855601): Upload the matrix to GPU when textureTransform is changed.
             val program: Program2D = requireNotNull(mCurrentProgram)
@@ -445,30 +444,20 @@ class OpenGlRenderer {
         val surfaceWidth = outputSurface.viewPortRect.width()
         val surfaceHeight = outputSurface.viewPortRect.height()
 
-        val hasFullScreenInput = inputs.any { input ->
+        val hasFullScreenInput = !outputSurface.isLetterboxed && inputs.any { input ->
             val rect = input.targetRectNorm
             rect.left == 0f && rect.top == 0f && rect.right == 1f && rect.bottom == 1f
         }
 
         if (isMuted || inputs.isEmpty()) {
             GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
-            GLES20.glViewport(
-                outputSurface.viewPortRect.left,
-                outputSurface.viewPortRect.top,
-                surfaceWidth,
-                surfaceHeight
-            )
+            GLES20.glViewport(0, 0, outputSurface.width, outputSurface.height)
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         } else {
             if (!hasFullScreenInput) {
                 GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
-                GLES20.glViewport(
-                    outputSurface.viewPortRect.left,
-                    outputSurface.viewPortRect.top,
-                    surfaceWidth,
-                    surfaceHeight
-                )
+                GLES20.glViewport(0, 0, outputSurface.width, outputSurface.height)
                 GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             }
@@ -864,9 +853,8 @@ class OpenGlRenderer {
             mCurrentSurface = surface
         }
 
-        val surfaceSize = getSurfaceSize(mEglDisplay, outputSurface.eglSurface)
-        val targetW = surfaceSize.width.takeIf { it > 0 } ?: outputSurface.viewPortRect.width()
-        val targetH = surfaceSize.height.takeIf { it > 0 } ?: outputSurface.viewPortRect.height()
+        val targetW = outputSurface.width.takeIf { it > 0 } ?: outputSurface.viewPortRect.width()
+        val targetH = outputSurface.height.takeIf { it > 0 } ?: outputSurface.viewPortRect.height()
 
         // Clear full surface first so letterbox/pillarbox bars are clean black
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
@@ -1134,7 +1122,7 @@ class OpenGlRenderer {
         val size = getSurfaceSize(mEglDisplay, eglSurface)
         // Use stored viewport rect if available, otherwise use full surface
         val viewportRect = mViewportRectMap[surface] ?: Rect(0, 0, size.width, size.height)
-        return OutputSurface(eglSurface, viewportRect)
+        return OutputSurface(eglSurface, viewportRect, size.width, size.height)
     }
 
     protected fun removeOutputSurfaceInternal(surface: Surface, unregister: Boolean) {
