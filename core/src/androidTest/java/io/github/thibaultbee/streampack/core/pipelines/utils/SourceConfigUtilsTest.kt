@@ -84,4 +84,22 @@ class SourceConfigUtilsTest {
             assertEquals("All video source configs must have the same fps but [30, 25]", e.message)
         }
     }
+
+    @Test
+    fun videoSourceConfigWithDifferentForceConstantFps() {
+        val videoSourceConfigs = setOf(
+            VideoSourceConfig(fps = 30, forceConstantFps = false),
+            VideoSourceConfig(fps = 30, forceConstantFps = true)
+        )
+
+        try {
+            SourceConfigUtils.buildVideoSourceConfig(videoSourceConfigs)
+            fail("All video source configs must have the same forceConstantFps")
+        } catch (e: IllegalArgumentException) {
+            assertEquals(
+                "All video source configs must have the same forceConstantFps but [false, true]",
+                e.message
+            )
+        }
+    }
 }

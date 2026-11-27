@@ -163,11 +163,12 @@ fun DualStreamerVideoConfig(
 fun DualStreamerVideoConfig(
     fps: Int = DEFAULT_FPS,
     cameraFps: Int? = null,
+    forceConstantFps: Boolean = false,
     firstVideoCodecConfig: DualStreamerVideoCodecConfig = DualStreamerVideoCodecConfig(),
     secondVideoCodecConfig: DualStreamerVideoCodecConfig = DualStreamerVideoCodecConfig()
 ) = DualStreamerVideoConfig(
-    firstVideoCodecConfig.toVideoCodecConfig(fps, cameraFps),
-    secondVideoCodecConfig.toVideoCodecConfig(fps, cameraFps)
+    firstVideoCodecConfig.toVideoCodecConfig(fps, cameraFps, forceConstantFps),
+    secondVideoCodecConfig.toVideoCodecConfig(fps, cameraFps, forceConstantFps)
 )
 
 /**
@@ -212,12 +213,17 @@ data class DualStreamerVideoCodecConfig(
      */
     val gopDurationInS: Float = 1f  // 1s between I frames
 ) {
-    internal fun toVideoCodecConfig(fps: Int, cameraFps: Int? = null) = VideoCodecConfig(
+    internal fun toVideoCodecConfig(
+        fps: Int,
+        cameraFps: Int? = null,
+        forceConstantFps: Boolean = false
+    ) = VideoCodecConfig(
         mimeType = mimeType,
         startBitrate = startBitrate,
         resolution = resolution,
         fps = fps,
         cameraFps = cameraFps,
+        forceConstantFps = forceConstantFps,
         profile = profile,
         level = level,
         gopDurationInS = gopDurationInS

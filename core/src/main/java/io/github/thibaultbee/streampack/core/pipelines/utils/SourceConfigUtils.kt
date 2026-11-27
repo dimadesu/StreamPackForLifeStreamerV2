@@ -35,8 +35,16 @@ object SourceConfigUtils {
         require(fps.size == 1) { "All video source configs must have the same fps but $fps" }
         val cameraFps = videoSourceConfigs.map { it.cameraFps }.distinct()
         require(cameraFps.size == 1) { "All video source configs must have the same cameraFps but $cameraFps" }
+        val forceConstantFps = videoSourceConfigs.map { it.forceConstantFps }.distinct()
+        require(forceConstantFps.size == 1) { "All video source configs must have the same forceConstantFps but $forceConstantFps" }
         val dynamicRangeProfiles = videoSourceConfigs.map { it.dynamicRangeProfile }.distinct()
         require(dynamicRangeProfiles.size == 1) { "All video source configs must have the same dynamic range profile but $dynamicRangeProfiles" }
-        return VideoSourceConfig(maxResolution, fps.first(), dynamicRangeProfiles.first(), cameraFps.first())
+        return VideoSourceConfig(
+            maxResolution,
+            fps.first(),
+            dynamicRangeProfiles.first(),
+            cameraFps.first(),
+            forceConstantFps.first()
+        )
     }
 }

@@ -111,6 +111,10 @@ internal class MediaProjectionVideoSource(
     }
 
     private var outputSurfaceOutput: SurfaceOutput? = null
+    private var videoSourceConfig: VideoSourceConfig? = null
+
+    private val effectiveCfrFps: Int
+        get() = if (videoSourceConfig?.forceConstantFps == true) 0 else cfrFps
 
     override suspend fun getOutput() = outputSurface
     override suspend fun setOutput(surface: Surface) {
@@ -125,8 +129,9 @@ internal class MediaProjectionVideoSource(
     }
 
     private fun setupProcessorAndSurfaces(surface: Surface, screenSize: Size) {
-        if (cfrFps > 0) {
-            val processor = surfaceProcessor ?: DefaultSurfaceProcessorFactory(cfrFps).create(
+        val localCfrFps = effectiveCfrFps
+        if (localCfrFps > 0) {
+            val processor = surfaceProcessor ?: DefaultSurfaceProcessorFactory(localCfrFps).create(
                 context,
                 io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRangeProfile.sdr,
                 dispatcherProvider
@@ -148,6 +153,13 @@ internal class MediaProjectionVideoSource(
             )
             processor.addOutputSurface(outputSurfaceOutput!!)
         } else {
+            surfaceProcessor?.let {
+                outputSurfaceOutput?.let { output -> it.removeOutputSurface(output) }
+                inputSurface?.let { input -> it.removeInputSurface(input) }
+                it.release()
+            }
+            surfaceProcessor = null
+            outputSurfaceOutput = null
             inputSurface = surface
         }
     }
@@ -170,7 +182,9 @@ internal class MediaProjectionVideoSource(
         configuredSurfaceSize = null
     }
 
-    override suspend fun configure(config: VideoSourceConfig) = Unit
+    override suspend fun configure(config: VideoSourceConfig) {
+        videoSourceConfig = config
+    }
 
     override suspend fun startStream() {
         val screenSize = getMediaProjectionSurfaceSize()

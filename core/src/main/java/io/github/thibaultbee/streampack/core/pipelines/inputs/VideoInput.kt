@@ -520,18 +520,21 @@ internal class VideoInput(
         if (previousVideoConfig?.dynamicRangeProfile != videoConfig.dynamicRangeProfile) {
             releaseSurfaceProcessor()
             processor = buildSurfaceProcessor(videoConfig)
-        } else if (previousVideoConfig.resolution != videoConfig.resolution) {
-            outputSurface?.let {
-                if (videoSourceInternal is ISurfaceSourceInternal) {
-                    videoSourceInternal.resetOutput()
+        } else {
+            currentSurfaceProcessor.setCfrFps(if (videoConfig.forceConstantFps) videoConfig.fps else 0)
+            if (previousVideoConfig.resolution != videoConfig.resolution) {
+                outputSurface?.let {
+                    if (videoSourceInternal is ISurfaceSourceInternal) {
+                        videoSourceInternal.resetOutput()
+                    }
+                    currentSurfaceProcessor.removeInputSurface(it)
+                    updateOutputSurfacesUnsafe(videoSourceConfig = videoConfig)
+                    addSourceSurface(
+                        videoConfig,
+                        currentSurfaceProcessor,
+                        videoSourceInternal
+                    )
                 }
-                currentSurfaceProcessor.removeInputSurface(it)
-                updateOutputSurfacesUnsafe(videoSourceConfig = videoConfig)
-                addSourceSurface(
-                    videoConfig,
-                    currentSurfaceProcessor,
-                    videoSourceInternal
-                )
             }
         }
     }
@@ -565,6 +568,7 @@ internal class VideoInput(
                 videoSourceConfig.dynamicRangeProfile,
                 dispatcherProvider
             )
+        newSurfaceProcessor.setCfrFps(if (videoSourceConfig.forceConstantFps) videoSourceConfig.fps else 0)
         // Re-adds source surface
         addSourceSurface(videoSourceConfig, newSurfaceProcessor)
 

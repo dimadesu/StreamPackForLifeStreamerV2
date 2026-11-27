@@ -75,7 +75,10 @@ val AudioCodecConfig.sourceConfig: AudioSourceConfig
  * @return `true` if [VideoSourceConfig] is compatible with [VideoSourceConfig], `false` otherwise
  */
 fun VideoSourceConfig.isCompatibleWith(sourceConfig: VideoSourceConfig): Boolean {
-    return (fps == sourceConfig.fps) && (cameraFps == sourceConfig.cameraFps) && (dynamicRangeProfile == sourceConfig.dynamicRangeProfile)
+    return (fps == sourceConfig.fps) &&
+            (cameraFps == sourceConfig.cameraFps) &&
+            (forceConstantFps == sourceConfig.forceConstantFps) &&
+            (dynamicRangeProfile == sourceConfig.dynamicRangeProfile)
 }
 
 /**
@@ -85,7 +88,10 @@ fun VideoSourceConfig.isCompatibleWith(sourceConfig: VideoSourceConfig): Boolean
  * @return `true` if [VideoSourceConfig] is compatible with [VideoSourceConfig], `false` otherwise
  */
 fun VideoCodecConfig.isCompatibleWith(sourceConfig: VideoSourceConfig): Boolean {
-    return (fps == sourceConfig.fps) && (cameraFps == sourceConfig.cameraFps) && (dynamicRangeProfile == sourceConfig.dynamicRangeProfile)
+    return (fps == sourceConfig.fps) &&
+            (cameraFps == sourceConfig.cameraFps) &&
+            (forceConstantFps == sourceConfig.forceConstantFps) &&
+            (dynamicRangeProfile == sourceConfig.dynamicRangeProfile)
 }
 
 /**
@@ -95,7 +101,10 @@ fun VideoCodecConfig.isCompatibleWith(sourceConfig: VideoSourceConfig): Boolean 
  * @return `true` if [VideoCodecConfig] is compatible with [VideoCodecConfig], `false` otherwise
  */
 fun VideoCodecConfig.isCompatibleWith(codecConfig: VideoCodecConfig): Boolean {
-    return (fps == codecConfig.fps) && (cameraFps == codecConfig.cameraFps) && (dynamicRangeProfile == codecConfig.dynamicRangeProfile)
+    return (fps == codecConfig.fps) &&
+            (cameraFps == codecConfig.cameraFps) &&
+            (forceConstantFps == codecConfig.forceConstantFps) &&
+            (dynamicRangeProfile == codecConfig.dynamicRangeProfile)
 }
 
 /**
@@ -108,5 +117,6 @@ val VideoCodecConfig.sourceConfig: VideoSourceConfig
         resolution = resolution,
         fps = fps,
         dynamicRangeProfile = dynamicRangeProfile,
-        cameraFps = cameraFps
+        cameraFps = cameraFps,
+        forceConstantFps = forceConstantFps
     )

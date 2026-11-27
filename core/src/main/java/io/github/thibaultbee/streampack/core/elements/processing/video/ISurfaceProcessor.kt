@@ -94,6 +94,12 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
     fun removeAllOutputSurfaces()
 
     /**
+     * Dynamically configures constant frame rate (CFR) output pacing in frames per second.
+     * Pass `0` to disable CFR pacing and return to event-driven rendering.
+     */
+    fun setCfrFps(fps: Int) {}
+
+    /**
      * Starts rendering black transition frames at the specified [fps] to streaming outputs.
      * Used during video source switching to prevent frozen frames on the stream.
      */

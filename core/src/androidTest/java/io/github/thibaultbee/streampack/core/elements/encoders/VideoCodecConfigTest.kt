@@ -22,6 +22,7 @@ class VideoCodecConfigTest {
         Assert.assertNotEquals(videoConfig, VideoCodecConfig(startBitrate = 1_000))
         Assert.assertNotEquals(videoConfig, VideoCodecConfig(resolution = Size(1920, 1080)))
         Assert.assertNotEquals(videoConfig, VideoCodecConfig(fps = 15))
+        Assert.assertNotEquals(videoConfig, VideoCodecConfig(forceConstantFps = true))
         Assert.assertNotEquals(
             videoConfig,
             VideoCodecConfig(profile = 1234, level = videoConfig.level)

@@ -26,7 +26,13 @@ data class VideoSourceConfig(
     /**
      * Camera framerate in frames per second, if different from [fps].
      */
-    val cameraFps: Int? = null
+    val cameraFps: Int? = null,
+
+    /**
+     * Whether the surface processor should force-feed frames at [fps] by duplicating or dropping
+     * frames when the source framerate differs from [fps].
+     */
+    val forceConstantFps: Boolean = false
 ) {
     /**
      * The Android dynamic range profile.
