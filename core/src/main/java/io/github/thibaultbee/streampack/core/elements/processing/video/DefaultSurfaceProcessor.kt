@@ -19,6 +19,7 @@ package io.github.thibaultbee.streampack.core.elements.processing.video
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
+import android.os.Process
 import android.util.Size
 import android.view.Surface
 import androidx.annotation.IntRange
@@ -44,15 +45,20 @@ import io.github.thibaultbee.streampack.core.utils.InternalStreamPackApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import kotlin.math.abs
 
 @OptIn(InternalStreamPackApi::class)
 private class DefaultSurfaceProcessor(
     private val dynamicRangeProfile: DynamicRangeProfile,
     private val glThread: HandlerThreadExecutor,
-    private val cfrFps: Int = 0
+    initialCfrFps: Int = 0
 ) : ISurfaceProcessorInternal, SurfaceTexture.OnFrameAvailableListener, ISnapshotable {
     override var isMuted: Boolean = false
     override var inputResolver: IInputResolver? = null
@@ -75,10 +81,18 @@ private class DefaultSurfaceProcessor(
         hashMapOf()
     private val surfaceInputsToMatrixMap: MutableMap<SurfaceTexture, FloatArray> = hashMapOf()
 
-    // CFR & Transition Render loop state
+    // CFR & Transition Render loop state (accessed on GL thread)
     @Volatile private var latestTimestampNs: Long = 0L
     @Volatile private var hasFirstFrame: Boolean = false
-    private var isRenderLoopRunning = false
+    private var cfrFps: Int = initialCfrFps.coerceAtLeast(0)
+    private var transitionFps: Int = 0
+    private val ptsClock = CfrPtsClock()
+    private var pacerExecutor: ScheduledExecutorService? = null
+    private var pacerFuture: ScheduledFuture<*>? = null
+    private var activePacerFps: Int = 0
+    private val renderTickPending = AtomicBoolean(false)
+    private var pendingPostTransitionKeyFrame: Boolean = false
+
     private val _isTransitioningFlow = MutableStateFlow(false)
     override val isTransitioningFlow: StateFlow<Boolean> = _isTransitioningFlow.asStateFlow()
     @Volatile private var isTransitioning: Boolean = false
@@ -86,55 +100,30 @@ private class DefaultSurfaceProcessor(
             field = value
             _isTransitioningFlow.value = value
         }
-    private var transitionIntervalNs: Long = 0L
     private var transitionStartTimeNs: Long = 0L
     private var lastBlurStepTimeNs: Long = 0L
     private var transitionReferenceTargetRotation: Int = Surface.ROTATION_0
     private var transitionPreviewTargetRotation: Int = Surface.ROTATION_0
     private var transitionHasSeparatePreviewFbo: Boolean = false
     private var incomingPrimarySurface: Surface? = null
-    private val cfrFrameIntervalNs = if (cfrFps > 0) 1_000_000_000L / cfrFps else 0L
-    private var nextFrameTimeNs = 0L
     private val transitionTimeoutRunnable = Runnable {
         if (isTransitioning) {
             Logger.w(TAG, "Transition timed out after ${TRANSITION_TIMEOUT_MS}ms, stopping transition loop")
             stopTransitionInternal()
         }
     }
-    private val renderRunnable = object : Runnable {
-        override fun run() {
-            if (isReleaseRequested.get() || isReleased) return
+    private val glTickRunnable = Runnable {
+        renderTickPending.set(false)
+        if (isReleaseRequested.get() || isReleased) return@Runnable
 
-            val intervalNs = if (isTransitioning) {
-                transitionIntervalNs
-            } else if (cfrFps > 0) {
-                cfrFrameIntervalNs
-            } else {
-                0L
-            }
-
-            if (intervalNs <= 0L) {
-                isRenderLoopRunning = false
-                return
-            }
-
-            val nowNs = System.nanoTime()
-            if (nextFrameTimeNs == 0L) {
-                nextFrameTimeNs = nowNs
-            }
-
-            if (nowNs >= nextFrameTimeNs) {
-                renderLatestFrame()
-                // Skip missed slots so a slow render doesn't burst later.
-                do {
-                    nextFrameTimeNs += intervalNs
-                } while (nextFrameTimeNs <= nowNs)
-            }
-
-            val delayMs = ((nextFrameTimeNs - System.nanoTime() + 999_999L) / 1_000_000L)
-                .coerceAtLeast(0L)
-            glHandler.postDelayed(this, delayMs)
+        val loopFps = desiredLoopFpsLocked()
+        if (loopFps <= 0) {
+            stopPacerFutureLocked()
+            return@Runnable
         }
+
+        val ptsNs = ptsClock.nextPtsNs(loopFps, System.nanoTime()) ?: return@Runnable
+        renderLatestFrame(ptsNs)
     }
 
     private val pendingSnapshots = mutableListOf<PendingSnapshot>()
@@ -154,6 +143,97 @@ private class DefaultSurfaceProcessor(
         }
     }
 
+    override fun setCfrFps(fps: Int) {
+        if (isReleaseRequested.get()) return
+        val normalizedFps = fps.coerceAtLeast(0)
+        executeSafely {
+            if (isReleaseRequested.get() || isReleased) return@executeSafely
+            if (cfrFps == normalizedFps) return@executeSafely
+            cfrFps = normalizedFps
+            if (normalizedFps == 0 && !isTransitioning) {
+                ptsClock.reset()
+                pendingPostTransitionKeyFrame = false
+            }
+            val initialDelayNs = if (normalizedFps > 0 && !isTransitioning && hasFirstFrame) {
+                (1_000_000_000L / normalizedFps) / 2L
+            } else {
+                null
+            }
+            syncRenderLoopLocked(initialDelayNs)
+            Logger.i(
+                TAG,
+                if (normalizedFps > 0) "Enabled CFR render loop at $normalizedFps fps"
+                else "Disabled CFR render loop (event-driven)"
+            )
+        }
+    }
+
+    private fun desiredLoopFpsLocked(): Int {
+        if (isReleaseRequested.get() || isReleased) return 0
+        return when {
+            isTransitioning -> if (cfrFps > 0) cfrFps else transitionFps
+            cfrFps > 0 && hasFirstFrame && surfaceInputs.isNotEmpty() -> cfrFps
+            else -> 0
+        }
+    }
+
+    private fun ensurePacerExecutorLocked(): ScheduledExecutorService {
+        return pacerExecutor ?: Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread({
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                } catch (_: Throwable) {
+                }
+                runnable.run()
+            }, "SurfaceProcessorPacer").apply {
+                isDaemon = true
+            }
+        }.also { pacerExecutor = it }
+    }
+
+    private fun stopPacerFutureLocked() {
+        pacerFuture?.cancel(false)
+        pacerFuture = null
+        activePacerFps = 0
+        renderTickPending.set(false)
+        glHandler.removeCallbacks(glTickRunnable)
+    }
+
+    private fun shutdownPacerLocked() {
+        stopPacerFutureLocked()
+        pacerExecutor?.shutdownNow()
+        pacerExecutor = null
+    }
+
+    private fun syncRenderLoopLocked(initialDelayNs: Long? = null) {
+        val targetFps = desiredLoopFpsLocked()
+        if (targetFps <= 0) {
+            stopPacerFutureLocked()
+            return
+        }
+        if (pacerFuture != null && activePacerFps == targetFps && initialDelayNs == null) {
+            return
+        }
+        stopPacerFutureLocked()
+        val intervalNs = 1_000_000_000L / targetFps
+        val resolvedInitialDelayNs = (initialDelayNs ?: 0L).coerceAtLeast(0L)
+        val executor = ensurePacerExecutorLocked()
+        activePacerFps = targetFps
+        pacerFuture = executor.scheduleAtFixedRate(
+            {
+                if (!isReleaseRequested.get() && renderTickPending.compareAndSet(false, true)) {
+                    if (!glHandler.post(glTickRunnable)) {
+                        renderTickPending.set(false)
+                    }
+                }
+            },
+            resolvedInitialDelayNs,
+            intervalNs,
+            TimeUnit.NANOSECONDS
+        )
+        Logger.i(TAG, "Scheduled render loop at $targetFps fps (initialDelayNs=$resolvedInitialDelayNs)")
+    }
+
     override fun createInputSurface(
         surfaceSize: Size,
         timebase: Timebase,
@@ -161,9 +241,6 @@ private class DefaultSurfaceProcessor(
     ): Surface {
         if (isReleaseRequested.get()) {
             throw IllegalStateException("SurfaceProcessor is released")
-        }
-        require(cfrFps <= 0 || surfaceInputs.isEmpty()) {
-            "CFR mode supports only a single input surface"
         }
 
         val future = submitSafely {
@@ -195,21 +272,11 @@ private class DefaultSurfaceProcessor(
             if (!isSecondary) {
                 incomingPrimarySurface = surfaceInput.surface
             }
+            syncRenderLoopLocked()
             surfaceInput
         }
 
         val surfaceInput = future.get()
-
-        // Start CFR render loop when input is created, if enabled
-        executeSafely {
-            if (cfrFps > 0 && !isRenderLoopRunning) {
-                isRenderLoopRunning = true
-                nextFrameTimeNs = 0L
-                glHandler.post(renderRunnable)
-                Logger.i(TAG, "Started CFR render loop at $cfrFps fps")
-            }
-        }
-
         return surfaceInput.surface
     }
 
@@ -237,9 +304,12 @@ private class DefaultSurfaceProcessor(
                     incomingPrimarySurface = null
                 }
 
-                if (surfaceInputs.isEmpty() && isRenderLoopRunning && !isTransitioning) {
-                    isRenderLoopRunning = false
-                    glHandler.removeCallbacks(renderRunnable)
+                if (surfaceInputs.isEmpty()) {
+                    hasFirstFrame = false
+                    if (!isTransitioning && cfrFps == 0) {
+                        ptsClock.reset()
+                    }
+                    syncRenderLoopLocked()
                 }
 
                 checkReadyToRelease()
@@ -362,8 +432,9 @@ private class DefaultSurfaceProcessor(
             if (!isReleased) {
                 isReleased = true
                 isTransitioning = false
-                isRenderLoopRunning = false
-                glHandler.removeCallbacks(renderRunnable)
+                pendingPostTransitionKeyFrame = false
+                shutdownPacerLocked()
+                ptsClock.reset()
                 glHandler.removeCallbacks(transitionTimeoutRunnable)
 
                 checkReadyToRelease()
@@ -373,6 +444,7 @@ private class DefaultSurfaceProcessor(
 
     private fun checkReadyToRelease() {
         if (isReleased && surfaceInputs.isEmpty()) {
+            shutdownPacerLocked()
             // Once release is called, we can stop sending frame to output surfaces.
             removeAllOutputSurfacesInternal()
 
@@ -386,7 +458,7 @@ private class DefaultSurfaceProcessor(
         val future = submitSafely {
             if (isReleaseRequested.get() || isReleased) return@submitSafely
             val targetFps = if (fps > 0) fps else 30
-            transitionIntervalNs = 1_000_000_000L / targetFps
+            transitionFps = targetFps
             if (!isTransitioning) {
                 captureLastFrameForTransition()
                 transitionStartTimeNs = System.nanoTime()
@@ -395,16 +467,12 @@ private class DefaultSurfaceProcessor(
             isTransitioning = true
             hasFirstFrame = false
             incomingPrimarySurface = null
-            nextFrameTimeNs = 0L
+            pendingPostTransitionKeyFrame = false
 
             glHandler.removeCallbacks(transitionTimeoutRunnable)
             glHandler.postDelayed(transitionTimeoutRunnable, TRANSITION_TIMEOUT_MS)
 
-            if (!isRenderLoopRunning) {
-                isRenderLoopRunning = true
-                glHandler.post(renderRunnable)
-                Logger.i(TAG, "Started transition blur frame loop at $targetFps fps")
-            }
+            syncRenderLoopLocked()
         }
         try {
             future.get()
@@ -494,12 +562,11 @@ private class DefaultSurfaceProcessor(
         glHandler.removeCallbacks(transitionTimeoutRunnable)
         if (isTransitioning) {
             isTransitioning = false
-            nextFrameTimeNs = 0L
-            Logger.i(TAG, "Stopped transition black frame loop")
-            if (cfrFps <= 0 && isRenderLoopRunning) {
-                isRenderLoopRunning = false
-                glHandler.removeCallbacks(renderRunnable)
+            Logger.i(TAG, "Stopped transition blur frame loop")
+            if (cfrFps <= 0) {
+                ptsClock.reset()
             }
+            syncRenderLoopLocked()
         }
     }
 
@@ -565,13 +632,15 @@ private class DefaultSurfaceProcessor(
             Logger.w(TAG, "updateTexImage failed (surface likely released): ${e.message}")
             return
         }
-        val transform = surfaceInputsToMatrixMap[surfaceTexture] ?: FloatArray(16)
+        val transform = surfaceInputsToMatrixMap.getOrPut(surfaceTexture) { FloatArray(16) }
         surfaceTexture.getTransformMatrix(transform)
-        surfaceTexture.getTransformMatrix(textureMatrix)
 
         surfaceInputs.find { it.surfaceTexture == surfaceTexture }?.hasFrame = true
 
         val isPrimary = isPrimaryInput(surfaceTexture)
+        if (isPrimary) {
+            transform.copyInto(textureMatrix)
+        }
         val shouldCompleteTransition = if (isTransitioning) {
             val expectedPrimary = incomingPrimarySurface
             val primaryInputReady = expectedPrimary != null &&
@@ -605,23 +674,31 @@ private class DefaultSurfaceProcessor(
             } else if (latestTimestampNs == 0L) {
                 latestTimestampNs = timeConverter.convertToUptimeNs(surfaceTexture.timestamp)
             }
+            val hadFirstFrame = hasFirstFrame
             hasFirstFrame = true
 
             val wasTransitioning = isTransitioning
             if (wasTransitioning) {
                 stopTransitionInternal()
+            } else if (!hadFirstFrame && cfrFps > 0) {
+                // Offset CFR pacer by half a frame interval from the initial frame arrival
+                // to maximize phase margin against source frame jitter.
+                val halfIntervalNs = (1_000_000_000L / cfrFps) / 2L
+                syncRenderLoopLocked(initialDelayNs = halfIntervalNs)
             }
 
             if (cfrFps == 0) {
                 // Standard event-driven render
-                renderLatestFrame()
-            }
-
-            if (wasTransitioning) {
-                // Request an immediate sync/keyframe on streaming video encoders so the first
-                // sharp frame after the blur transition is encoded as an I-frame instead of a
-                // high-QP P-frame predicted from the blurred transition frame.
-                requestKeyFrameOnStreamingOutputs()
+                renderLatestFrame(latestTimestampNs)
+                if (wasTransitioning) {
+                    // Request an immediate sync/keyframe on streaming video encoders so the first
+                    // sharp frame after the blur transition is encoded as an I-frame instead of a
+                    // high-QP P-frame predicted from the blurred transition frame.
+                    requestKeyFrameOnStreamingOutputs()
+                }
+            } else if (wasTransitioning) {
+                // Defer keyframe request until the next CFR pacer tick actually renders the sharp frame.
+                pendingPostTransitionKeyFrame = true
             }
         }
 
@@ -643,19 +720,13 @@ private class DefaultSurfaceProcessor(
     }
 
     // Executed on GL thread continuously (CFR/Transition) or onFrameAvailable (Event-driven)
-    private fun renderLatestFrame() {
+    private fun renderLatestFrame(renderTimestampNs: Long) {
         if (isTransitioning) {
-            renderTransitionFrame(System.nanoTime())
+            renderTransitionFrame(renderTimestampNs)
             return
         }
 
         if (!hasFirstFrame || surfaceInputs.isEmpty()) return
-
-        val renderTimestampNs = if (cfrFps > 0) {
-            System.nanoTime()
-        } else {
-            latestTimestampNs
-        }
 
         val resolver = inputResolver
         if (resolver == null) {
@@ -671,19 +742,25 @@ private class DefaultSurfaceProcessor(
                 surfaceOutputMatrix
             )
         }
+
+        if (pendingPostTransitionKeyFrame) {
+            pendingPostTransitionKeyFrame = false
+            requestKeyFrameOnStreamingOutputs()
+        }
     }
 
     private fun renderTransitionFrame(renderTimestampNs: Long) {
-        val elapsedSec = ((renderTimestampNs - transitionStartTimeNs).coerceAtLeast(0L)) / 1_000_000_000f
+        val nowNs = System.nanoTime()
+        val elapsedSec = ((nowNs - transitionStartTimeNs).coerceAtLeast(0L)) / 1_000_000_000f
         if (!isMuted &&
             renderer.hasTransitionFrame &&
             elapsedSec <= BLUR_RAMP_DURATION_SEC &&
-            (renderTimestampNs - lastBlurStepTimeNs) >= BLUR_STEP_INTERVAL_NS
+            (nowNs - lastBlurStepTimeNs) >= BLUR_STEP_INTERVAL_NS
         ) {
             // Progressive blur ramp (Moblin-style: 15 -> 45 at 1080p over the first 2 seconds,
             // stepped at ~10 Hz so fast 300ms switches stay moderately blurred while slower
             // 1-2s switches smoothly deepen).
-            lastBlurStepTimeNs = renderTimestampNs
+            lastBlurStepTimeNs = nowNs
             val progress = (elapsedSec / BLUR_RAMP_DURATION_SEC).coerceIn(0f, 1f)
             renderer.stepTransitionBlur(0.45f + progress * 0.45f)
         }
@@ -894,4 +971,73 @@ internal fun selectSnapshotSurface(surfaceOutputs: List<ISurfaceOutput>): ISurfa
         .maxByOrNull { it.targetResolution.width * it.targetResolution.height }
         ?: candidates.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
         ?: surfaceOutputs.maxByOrNull { it.targetResolution.width * it.targetResolution.height }
+}
+
+/**
+ * Generates drift-bounded rational presentation timestamps (`startPtsNs + counter / fps`) for
+ * constant-frame-rate and transition render loops, modeled after Moblin's `VideoUnit` frame timer:
+ * - Absorbs normal timer/GL wakeup jitter within [driftLimitNs] so encoded frames have exact `1 / fps`
+ *   intervals instead of noisy wall-clock deltas.
+ * - If the grid runs ahead of [nowNs] by more than [driftLimitNs], holds the counter back and returns
+ *   `null` so the caller skips that premature tick without compressing frame intervals.
+ * - If the grid falls behind [nowNs] by more than [driftLimitNs] (e.g. a GL stall), advances the
+ *   counter past the missed slots so timestamps stay anchored to monotonic uptime for A/V sync.
+ */
+internal class CfrPtsClock(
+    private val driftLimitNs: Long = DEFAULT_PTS_DRIFT_LIMIT_NS
+) {
+    private var fps: Int = 0
+    private var startPtsNs: Long = 0L
+    private var outputCounter: Long = -1L
+    private var lastEmittedPtsNs: Long = 0L
+
+    fun reset() {
+        fps = 0
+        startPtsNs = 0L
+        outputCounter = -1L
+        lastEmittedPtsNs = 0L
+    }
+
+    fun nextPtsNs(targetFps: Int, nowNs: Long): Long? {
+        require(targetFps > 0) { "targetFps must be > 0" }
+        val intervalNs = 1_000_000_000L / targetFps
+        if (fps != targetFps || startPtsNs == 0L || outputCounter < 0L) {
+            fps = targetFps
+            val minNextPtsNs = if (lastEmittedPtsNs > 0L) lastEmittedPtsNs + intervalNs else nowNs
+            startPtsNs = maxOf(nowNs, minNextPtsNs)
+            outputCounter = 0L
+            lastEmittedPtsNs = startPtsNs
+            return startPtsNs
+        }
+
+        outputCounter += 1L
+        var ptsNs = computeGridPtsNs(startPtsNs, outputCounter, targetFps)
+        val deltaFromClockNs = ptsNs - nowNs
+        if (abs(deltaFromClockNs) > driftLimitNs) {
+            if (deltaFromClockNs > 0L) {
+                outputCounter -= 1L
+                return null
+            } else {
+                val behindNs = -deltaFromClockNs
+                val slotsToSkip = ((behindNs * targetFps) / 1_000_000_000L).coerceAtLeast(1L)
+                outputCounter += slotsToSkip
+                ptsNs = computeGridPtsNs(startPtsNs, outputCounter, targetFps)
+            }
+        }
+        if (ptsNs <= lastEmittedPtsNs) {
+            return null
+        }
+        lastEmittedPtsNs = ptsNs
+        return ptsNs
+    }
+
+    companion object {
+        const val DEFAULT_PTS_DRIFT_LIMIT_NS = 30_000_000L // 30ms (matches Moblin's deltaLimit = 0.03s)
+
+        internal fun computeGridPtsNs(startPtsNs: Long, counter: Long, fps: Int): Long {
+            val seconds = counter / fps
+            val remFrames = counter % fps
+            return startPtsNs + seconds * 1_000_000_000L + (remFrames * 1_000_000_000L) / fps
+        }
+    }
 }
