@@ -164,18 +164,18 @@ class VideoInputTest {
         }
 
     @Test
-    fun `setSourceConfig updates processor CFR fps when forceConstantFps is toggled`() =
+    fun `setSourceConfig updates processor forceConstantFps when forceConstantFps is toggled`() =
         runTest {
             setPreviewableSource(isPreviewStale = false)
 
             videoInput.setSourceConfig(
                 VideoSourceConfig(resolution = Size(1920, 1080), fps = 60, cameraFps = 30, forceConstantFps = true)
             )
-            verify(exactly = 1) { processor.setCfrFps(60) }
+            verify(exactly = 1) { processor.setForceConstantFps(60) }
 
             videoInput.setSourceConfig(
                 VideoSourceConfig(resolution = Size(1920, 1080), fps = 60, cameraFps = 30, forceConstantFps = false)
             )
-            verify(exactly = 1) { processor.setCfrFps(0) }
+            verify(exactly = 1) { processor.setForceConstantFps(0) }
         }
 }

@@ -521,7 +521,7 @@ internal class VideoInput(
             releaseSurfaceProcessor()
             processor = buildSurfaceProcessor(videoConfig)
         } else {
-            currentSurfaceProcessor.setCfrFps(if (videoConfig.forceConstantFps) videoConfig.fps else 0)
+            currentSurfaceProcessor.setForceConstantFps(if (videoConfig.forceConstantFps) videoConfig.fps else 0)
             if (previousVideoConfig.resolution != videoConfig.resolution) {
                 outputSurface?.let {
                     if (videoSourceInternal is ISurfaceSourceInternal) {
@@ -568,7 +568,7 @@ internal class VideoInput(
                 videoSourceConfig.dynamicRangeProfile,
                 dispatcherProvider
             )
-        newSurfaceProcessor.setCfrFps(if (videoSourceConfig.forceConstantFps) videoSourceConfig.fps else 0)
+        newSurfaceProcessor.setForceConstantFps(if (videoSourceConfig.forceConstantFps) videoSourceConfig.fps else 0)
         // Re-adds source surface
         addSourceSurface(videoSourceConfig, newSurfaceProcessor)
 
